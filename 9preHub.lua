@@ -1,290 +1,200 @@
-if not game:IsLoaded() then
-	game.Loaded:Wait()
-end
+local Players=game:GetService("Players")
+local TweenService=game:GetService("TweenService")
+local RunService=game:GetService("RunService")
+local UserInputService=game:GetService("UserInputService")
+local ReplicatedStorage=game:GetService("ReplicatedStorage")
+local Lighting=game:GetService("Lighting")
+local CollectionService=game:GetService("CollectionService")
 
-local Players = game:GetService("Players")
-local TweenService = game:GetService("TweenService")
-local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Lighting = game:GetService("Lighting")
-local CollectionService = game:GetService("CollectionService")
+local okVIM,VirtualInputManager=pcall(function()return game:GetService("VirtualInputManager")end)
+local okVU,VirtualUser=pcall(function()return game:GetService("VirtualUser")end)
 
-local okVIM, VirtualInputManager = pcall(function()
-	return game:GetService("VirtualInputManager")
-end)
-local okVU, VirtualUser = pcall(function()
-	return game:GetService("VirtualUser")
-end)
+local player=Players.LocalPlayer
+local playerGui=player:WaitForChild("PlayerGui")
+local isMobile=UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 
-local player = Players.LocalPlayer
-while not player do
-	task.wait()
-	player = Players.LocalPlayer
-end
+local combatRemote=ReplicatedStorage:FindFirstChild("CombatActionRemote")
+local skillRemote=ReplicatedStorage:FindFirstChild("SkillActionRemote")
 
-local playerGui = player:WaitForChild("PlayerGui")
-local isMobile = UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
-local combatRemote = ReplicatedStorage:FindFirstChild("CombatActionRemote")
-local skillRemote = ReplicatedStorage:FindFirstChild("SkillActionRemote")
-
-local function getSafeGuiParent()
-	if typeof(gethui) == "function" then
-		local ok, res = pcall(gethui)
-		if ok and res then
-			return res
-		end
-	end
-	local okCore, coreGui = pcall(function()
-		return game:GetService("CoreGui")
-	end)
-	if okCore and coreGui then
-		return coreGui
-	end
-	return playerGui
-end
-
-local State = {
-	MenuOpen = true,
-	ActiveTab = "Combat",
-	AutoSkill = false,
-	EnabledSkills = { [1] = true, [2] = true, [3] = true, [4] = false, [5] = false },
-	SkillDelay = 0.03,
-	SkillRange = 18,
-	AutoMission = false,
-	MissionScanRange = 1000,
-	MissionAutoAttack = true,
-	AttackPosition = "above",
-	HorizontalDist = 3.5,
-	VerticalOffset = 8.0,
-	AboveTiltAngle = 80,
-	BelowNoclip = true,
-	ScanRange = 300,
-	SelectedMobName = nil,
-	AutoFarm = false,
-	MoveMode = "Teleport",
-	TweenSpeed = 130,
-	FreezeAnimOnActive = true,
-	InfJump = false,
-	InfDash = false,
-	DashPower = 200,
-	ReduceEffects = false,
-	BoostFPS = false,
-	AntiAFK = true,
-	CurrentTarget = nil
+local State={
+	MenuOpen=true,
+	ActiveTab="Combat",
+	AutoSkill=false,
+	EnabledSkills={[1]=true,[2]=true,[3]=true,[4]=false,[5]=false},
+	SkillDelay=0.03,
+	SkillRange=18,
+	AutoMission=false,
+	MissionScanRange=1000,
+	MissionAutoAttack=true,
+	AttackPosition="above",
+	HorizontalDist=3.5,
+	VerticalOffset=8.0,
+	AboveTiltAngle=80,
+	BelowNoclip=true,
+	Noclip=true,
+	ScanRange=300,
+	SelectedMobName=nil,
+	AutoFarm=false,
+	MoveMode="Teleport",
+	TweenSpeed=75,
+	FreezeAnimOnActive=true,
+	InfJump=false,
+	InfDash=false,
+	DashPower=200,
+	ReduceEffects=false,
+	BoostFPS=false,
+	AntiAFK=true,
+	CurrentTarget=nil
 }
 
-local activeTween = nil
-local lastCombatPosition = nil
-local lastTpStep = 0
-local wasNoclipActive = false
+local activeTween=nil
+local lastCombatPosition=nil
 
 local function getCharacterParts()
-	local char = player.Character
-	if not char then
-		return nil, nil, nil
-	end
-	return char, char:FindFirstChild("HumanoidRootPart"), char:FindFirstChildOfClass("Humanoid")
+	local char=player.Character
+	if not char then return nil,nil,nil end
+	return char,char:FindFirstChild("HumanoidRootPart"),char:FindFirstChildOfClass("Humanoid")
 end
 
 local function isAnyCombatActive()
 	return State.AutoFarm or State.AutoMission
 end
 
-local ignoreFolderKeywords = {
-	"npc", "lobby", "safezone", "safe_zone", "shop", "quest", "town", "spawn",
-	"merchant", "vendor", "dialog", "interact", "summon", "pet", "minion",
-	"ally", "allies", "companion", "clone", "turret", "totem", "friendly"
-}
+local function shouldUseNoclip()
+	if not isAnyCombatActive() then return false end
+	if State.Noclip and (State.MoveMode=="Tween" or State.MoveMode=="Walk") then
+		return true
+	end
+	if State.AttackPosition=="below" and State.BelowNoclip then
+		return true
+	end
+	return false
+end
 
-local ownerKeyNames = {
-	"owner", "creator", "summoner", "master", "player", "userid",
-	"ownerid", "creatorid", "summonerid", "ally", "friendly", "isnpc", "npc"
-}
+local ignoreFolderKeywords={"npc","lobby","safezone","safe_zone","shop","quest","town","spawn","merchant","vendor","dialog","interact","summon","pet","minion","ally","allies","companion","clone","turret","totem","friendly"}
+local ownerKeyNames={"owner","creator","summoner","master","player","userid","ownerid","creatorid","summonerid","ally","friendly","isnpc","npc"}
 
 local function hasBlockedAncestor(inst)
-	local cur = inst.Parent
-	while cur and cur ~= workspace do
-		local lowerName = string.lower(cur.Name)
-		for _, kw in ipairs(ignoreFolderKeywords) do
-			if string.find(lowerName, kw, 1, true) then
-				return true
-			end
+	local cur=inst.Parent
+	while cur and cur~=workspace do
+		local lowerName=string.lower(cur.Name)
+		for _,kw in ipairs(ignoreFolderKeywords)do
+			if string.find(lowerName,kw,1,true)then return true end
 		end
-		if Players:GetPlayerFromCharacter(cur) then
-			return true
-		end
-		cur = cur.Parent
+		if Players:GetPlayerFromCharacter(cur)then return true end
+		cur=cur.Parent
 	end
 	return false
 end
 
 local function isPlayerOwnedOrSummon(model)
-	local lowerModelName = string.lower(model.Name)
-	local pName = string.lower(player.Name)
-	local pDisp = string.lower(player.DisplayName)
-	if string.find(lowerModelName, pName, 1, true) or (pDisp ~= "" and string.find(lowerModelName, pDisp, 1, true)) then
+	local lowerModelName=string.lower(model.Name)
+	local pName=string.lower(player.Name)
+	local pDisp=string.lower(player.DisplayName)
+	if string.find(lowerModelName,pName,1,true)or(pDisp~="" and string.find(lowerModelName,pDisp,1,true))then
 		return true
 	end
-
-	local okAttr, attrs = pcall(function()
-		return model:GetAttributes()
-	end)
-	if okAttr and type(attrs) == "table" then
-		for k, v in pairs(attrs) do
-			local lk = string.lower(tostring(k))
-			for _, okKey in ipairs(ownerKeyNames) do
-				if string.find(lk, okKey, 1, true) then
-					if v == true or type(v) == "string" or type(v) == "number" then
-						return true
-					end
+	local okAttr,attrs=pcall(function()return model:GetAttributes()end)
+	if okAttr and type(attrs)=="table" then
+		for k,v in pairs(attrs)do
+			local lk=string.lower(tostring(k))
+			for _,okKey in ipairs(ownerKeyNames)do
+				if string.find(lk,okKey,1,true)then
+					if v==true or type(v)=="string" or type(v)=="number" then return true end
 				end
 			end
 		end
 	end
-
-	for _, child in ipairs(model:GetDescendants()) do
-		if child:IsA("ValueBase") then
-			local lName = string.lower(child.Name)
-			for _, okKey in ipairs(ownerKeyNames) do
-				if string.find(lName, okKey, 1, true) then
-					if child:IsA("ObjectValue") and child.Value ~= nil then
-						return true
-					elseif child:IsA("BoolValue") and child.Value == true then
-						return true
-					elseif (child:IsA("StringValue") or child:IsA("IntValue") or child:IsA("NumberValue"))
-						and tostring(child.Value) ~= "" and tostring(child.Value) ~= "0" then
-						return true
-					end
+	for _,child in ipairs(model:GetDescendants())do
+		if child:IsA("ValueBase")then
+			local lName=string.lower(child.Name)
+			for _,okKey in ipairs(ownerKeyNames)do
+				if string.find(lName,okKey,1,true)then
+					if child:IsA("ObjectValue")and child.Value~=nil then return true
+					elseif child:IsA("BoolValue")and child.Value==true then return true
+					elseif(child:IsA("StringValue")or child:IsA("IntValue")or child:IsA("NumberValue"))and tostring(child.Value)~="" and tostring(child.Value)~="0" then return true end
 				end
 			end
 		end
 	end
-
-	local okTags, tags = pcall(function()
-		return CollectionService:GetTags(model)
-	end)
-	if okTags and type(tags) == "table" then
-		for _, t in ipairs(tags) do
-			local lt = string.lower(t)
-			if string.find(lt, "npc", 1, true) or string.find(lt, "summon", 1, true)
-				or string.find(lt, "ally", 1, true) or string.find(lt, "friendly", 1, true)
-				or string.find(lt, "pet", 1, true) then
+	local okTags,tags=pcall(function()return CollectionService:GetTags(model)end)
+	if okTags and type(tags)=="table" then
+		for _,t in ipairs(tags)do
+			local lt=string.lower(t)
+			if string.find(lt,"npc",1,true)or string.find(lt,"summon",1,true)or string.find(lt,"ally",1,true)or string.find(lt,"friendly",1,true)or string.find(lt,"pet",1,true)then
 				return true
 			end
 		end
 	end
-
 	return false
 end
 
-local function isLobbyOrFriendlyNPC(model, hum)
-	if model:FindFirstChildOfClass("ForceField") then
-		return true
+local function isLobbyOrFriendlyNPC(model,hum)
+	if model:FindFirstChildOfClass("ForceField")then return true end
+	for _,desc in ipairs(model:GetDescendants())do
+		if desc:IsA("ProximityPrompt")or desc:IsA("Dialog")or desc:IsA("ClickDetector")then return true end
 	end
-	for _, desc in ipairs(model:GetDescendants()) do
-		if desc:IsA("ProximityPrompt") or desc:IsA("Dialog") or desc:IsA("ClickDetector") then
-			return true
-		end
-	end
-	if hum.MaxHealth >= 1e8 or hum.MaxHealth ~= hum.MaxHealth then
-		return true
-	end
+	if hum.MaxHealth>=1e8 or hum.MaxHealth~=hum.MaxHealth then return true end
 	return false
 end
 
 local function isValidMob(model)
-	if not model or not model.Parent or not model:IsA("Model") then
-		return false
-	end
-	if Players:GetPlayerFromCharacter(model) then
-		return false
-	end
-	local hum = model:FindFirstChildOfClass("Humanoid")
-	local hrp = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
-	if not hum or not hrp or hum.Health <= 0 then
-		return false
-	end
-	if hasBlockedAncestor(model) then
-		return false
-	end
-	if isLobbyOrFriendlyNPC(model, hum) then
-		return false
-	end
-	if isPlayerOwnedOrSummon(model) then
-		return false
-	end
-	return true, hum, hrp
+	if not model or not model.Parent or not model:IsA("Model")then return false end
+	if Players:GetPlayerFromCharacter(model)then return false end
+	local hum=model:FindFirstChildOfClass("Humanoid")
+	local hrp=model:FindFirstChild("HumanoidRootPart")or model.PrimaryPart
+	if not hum or not hrp or hum.Health<=0 then return false end
+	if hasBlockedAncestor(model)then return false end
+	if isLobbyOrFriendlyNPC(model,hum)then return false end
+	if isPlayerOwnedOrSummon(model)then return false end
+	return true,hum,hrp
 end
 
-local mobCache = {}
-
+local mobCache={}
 local function registerPotentialMob(inst)
-	if not inst or not inst:IsA("Model") then
-		return
-	end
-	if Players:GetPlayerFromCharacter(inst) then
-		return
-	end
-	if inst:FindFirstChildOfClass("Humanoid") then
-		mobCache[inst] = true
-	end
+	if not inst or not inst:IsA("Model")then return end
+	if Players:GetPlayerFromCharacter(inst)then return end
+	if inst:FindFirstChildOfClass("Humanoid")then mobCache[inst]=true end
 end
 
-local disableClasses = {
-	ParticleEmitter = true, Trail = true, Beam = true, Fire = true,
-	Smoke = true, Sparkles = true, PointLight = true, SpotLight = true,
-	SurfaceLight = true, Highlight = true
-}
-
-local vfxFolderKeywords = {
-	"vfx", "fx", "effect", "skill", "slash", "beam", "aura", "projectile",
-	"blast", "wave", "orb", "meteor", "explosion", "hit", "magic", "spell",
-	"ability", "shockwave", "ring", "debris", "pillar", "tornado", "lightning", "visual"
-}
-
-local hookedVfxProps = setmetatable({}, { __mode = "k" })
+local disableClasses={ParticleEmitter=true,Trail=true,Beam=true,Fire=true,Smoke=true,Sparkles=true,PointLight=true,SpotLight=true,SurfaceLight=true,Highlight=true}
+local vfxFolderKeywords={"vfx","fx","effect","skill","slash","beam","aura","projectile","blast","wave","orb","meteor","explosion","hit","magic","spell","ability","shockwave","ring","debris","pillar","tornado","lightning","visual"}
+local hookedVfxProps=setmetatable({},{__mode="k"})
 
 local function isCharacterOrMobPart(inst)
-	local p = inst.Parent
-	while p and p ~= workspace do
-		if p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") then
-			return true
-		end
-		p = p.Parent
+	local p=inst.Parent
+	while p and p~=workspace do
+		if p:IsA("Model")and p:FindFirstChildOfClass("Humanoid")then return true end
+		p=p.Parent
 	end
 	return false
 end
 
 local function isInsideVfxContainer(inst)
-	local cur = inst
-	while cur and cur ~= workspace and cur ~= workspace.CurrentCamera do
-		local lowerName = string.lower(cur.Name)
-		for _, kw in ipairs(vfxFolderKeywords) do
-			if string.find(lowerName, kw, 1, true) then
-				return true
-			end
+	local cur=inst
+	while cur and cur~=workspace and cur~=workspace.CurrentCamera do
+		local lowerName=string.lower(cur.Name)
+		for _,kw in ipairs(vfxFolderKeywords)do
+			if string.find(lowerName,kw,1,true)then return true end
 		end
-		cur = cur.Parent
+		cur=cur.Parent
 	end
 	return false
 end
 
 local function forceHidePart(part)
 	pcall(function()
-		part.LocalTransparencyModifier = 1
-		part.Transparency = 1
-		part.CastShadow = false
+		part.LocalTransparencyModifier=1
+		part.Transparency=1
+		part.CastShadow=false
 	end)
-	if not hookedVfxProps[part] then
-		hookedVfxProps[part] = true
+	if not hookedVfxProps[part]then
+		hookedVfxProps[part]=true
 		pcall(function()
 			part:GetPropertyChangedSignal("Transparency"):Connect(function()
 				if State.ReduceEffects then
-					part.LocalTransparencyModifier = 1
-					if part.Transparency < 1 then
-						part.Transparency = 1
-					end
+					part.LocalTransparencyModifier=1
+					if part.Transparency<1 then part.Transparency=1 end
 				end
 			end)
 		end)
@@ -292,149 +202,106 @@ local function forceHidePart(part)
 end
 
 local function suppressSkillAndEnvEffect(inst)
-	if not inst or not inst.Parent then
-		return
-	end
-	if disableClasses[inst.ClassName] then
+	if not inst or not inst.Parent then return end
+	if disableClasses[inst.ClassName]then
 		pcall(function()
-			inst.Enabled = false
-			if inst:IsA("ParticleEmitter") then
-				inst.Rate = 0
-				inst:Clear()
-			elseif inst:IsA("Trail") then
-				inst:Clear()
-			end
+			inst.Enabled=false
+			if inst:IsA("ParticleEmitter")then inst.Rate=0 inst:Clear()
+			elseif inst:IsA("Trail")then inst:Clear() end
 		end)
-		if not hookedVfxProps[inst] then
-			hookedVfxProps[inst] = true
+		if not hookedVfxProps[inst]then
+			hookedVfxProps[inst]=true
 			pcall(function()
 				inst:GetPropertyChangedSignal("Enabled"):Connect(function()
-					if State.ReduceEffects and inst.Enabled then
-						inst.Enabled = false
-					end
+					if State.ReduceEffects and inst.Enabled then inst.Enabled=false end
 				end)
 			end)
 		end
 		return
 	end
-
-	if inst:IsA("Explosion") then
-		pcall(function()
-			inst.Visible = false
-			inst.BlastPressure = 0
-		end)
+	if inst:IsA("Explosion")then
+		pcall(function()inst.Visible=false inst.BlastPressure=0 end)
 		return
 	end
-
-	if inst:IsA("BillboardGui") or inst:IsA("SurfaceGui") then
-		if not isCharacterOrMobPart(inst) and isInsideVfxContainer(inst) then
-			pcall(function()
-				inst.Enabled = false
-			end)
+	if inst:IsA("BillboardGui")or inst:IsA("SurfaceGui")then
+		if not isCharacterOrMobPart(inst)and isInsideVfxContainer(inst)then
+			pcall(function()inst.Enabled=false end)
 		end
 		return
 	end
-
-	if inst:IsA("BasePart") and not isCharacterOrMobPart(inst) then
-		local inVfx = isInsideVfxContainer(inst)
-		local isEnergyMat = (not inst.CanCollide)
-			and (inst.Material == Enum.Material.Neon or inst.Material == Enum.Material.ForceField or inst.Material == Enum.Material.Glass)
-		local isMeshEffect = inst:IsA("MeshPart") and (not inst.CanCollide) and (not inst.Anchored)
-		if inVfx or isEnergyMat or isMeshEffect then
-			forceHidePart(inst)
-		end
-	elseif (inst:IsA("Decal") or inst:IsA("Texture")) and not isCharacterOrMobPart(inst) then
-		if isInsideVfxContainer(inst) or (inst.Parent and inst.Parent:IsA("BasePart") and not inst.Parent.CanCollide) then
-			pcall(function()
-				inst.Transparency = 1
-			end)
+	if inst:IsA("BasePart")and not isCharacterOrMobPart(inst)then
+		local inVfx=isInsideVfxContainer(inst)
+		local isEnergyMat=(not inst.CanCollide)and(inst.Material==Enum.Material.Neon or inst.Material==Enum.Material.ForceField or inst.Material==Enum.Material.Glass)
+		local isMeshEffect=inst:IsA("MeshPart")and(not inst.CanCollide)and(not inst.Anchored)
+		if inVfx or isEnergyMat or isMeshEffect then forceHidePart(inst)end
+	elseif(inst:IsA("Decal")or inst:IsA("Texture"))and not isCharacterOrMobPart(inst)then
+		if isInsideVfxContainer(inst)or(inst.Parent and inst.Parent:IsA("BasePart")and not inst.Parent.CanCollide)then
+			pcall(function()inst.Transparency=1 end)
 		end
 	end
 end
 
 local function applyReduceEffects()
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		suppressSkillAndEnvEffect(obj)
-	end
+	for _,obj in ipairs(workspace:GetDescendants())do suppressSkillAndEnvEffect(obj)end
 	if workspace.CurrentCamera then
-		for _, obj in ipairs(workspace.CurrentCamera:GetDescendants()) do
-			suppressSkillAndEnvEffect(obj)
-		end
+		for _,obj in ipairs(workspace.CurrentCamera:GetDescendants())do suppressSkillAndEnvEffect(obj)end
 	end
 end
 
 local function applyBoostFPS()
 	pcall(function()
-		Lighting.GlobalShadows = false
-		Lighting.FogEnd = 9e9
-		settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+		Lighting.GlobalShadows=false
+		Lighting.FogEnd=9e9
+		settings().Rendering.QualityLevel=Enum.QualityLevel.Level01
 	end)
-	for _, eff in ipairs(Lighting:GetChildren()) do
-		if eff:IsA("PostEffect") then
-			eff.Enabled = false
-		end
+	for _,eff in ipairs(Lighting:GetChildren())do
+		if eff:IsA("PostEffect")then eff.Enabled=false end
 	end
-	for _, obj in ipairs(workspace:GetDescendants()) do
-		if obj:IsA("BasePart") then
-			obj.Material = Enum.Material.SmoothPlastic
-			obj.Reflectance = 0
-			obj.CastShadow = false
-		elseif obj:IsA("Decal") or obj:IsA("Texture") then
-			obj.Transparency = 1
+	for _,obj in ipairs(workspace:GetDescendants())do
+		if obj:IsA("BasePart")then
+			obj.Material=Enum.Material.SmoothPlastic
+			obj.Reflectance=0
+			obj.CastShadow=false
+		elseif obj:IsA("Decal")or obj:IsA("Texture")then
+			obj.Transparency=1
 		else
 			suppressSkillAndEnvEffect(obj)
 		end
 	end
 end
 
-for _, obj in ipairs(workspace:GetDescendants()) do
-	if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
-		registerPotentialMob(obj.Parent)
-	end
+for _,obj in ipairs(workspace:GetDescendants())do
+	if obj:IsA("Humanoid")and obj.Parent and obj.Parent:IsA("Model")then registerPotentialMob(obj.Parent)end
 end
 
 workspace.DescendantAdded:Connect(function(obj)
-	if obj:IsA("Humanoid") and obj.Parent and obj.Parent:IsA("Model") then
+	if obj:IsA("Humanoid")and obj.Parent and obj.Parent:IsA("Model")then
 		registerPotentialMob(obj.Parent)
-	elseif obj:IsA("Model") then
-		task.defer(function()
-			if obj and obj.Parent then
-				registerPotentialMob(obj)
-			end
-		end)
+	elseif obj:IsA("Model")then
+		task.defer(function()if obj and obj.Parent then registerPotentialMob(obj)end end)
 	end
-
 	if State.ReduceEffects then
 		suppressSkillAndEnvEffect(obj)
-		task.defer(function()
-			if State.ReduceEffects and obj and obj.Parent then
-				suppressSkillAndEnvEffect(obj)
-			end
-		end)
+		task.defer(function()if State.ReduceEffects and obj and obj.Parent then suppressSkillAndEnvEffect(obj)end end)
 	end
-
 	if State.BoostFPS then
-		if obj:IsA("BasePart") then
-			obj.Material = Enum.Material.SmoothPlastic
-			obj.CastShadow = false
-		elseif obj:IsA("Decal") or obj:IsA("Texture") then
-			obj.Transparency = 1
+		if obj:IsA("BasePart")then
+			obj.Material=Enum.Material.SmoothPlastic
+			obj.CastShadow=false
+		elseif obj:IsA("Decal")or obj:IsA("Texture")then
+			obj.Transparency=1
 		end
 	end
 end)
 
 if workspace.CurrentCamera then
 	workspace.CurrentCamera.DescendantAdded:Connect(function(obj)
-		if State.ReduceEffects then
-			suppressSkillAndEnvEffect(obj)
-		end
+		if State.ReduceEffects then suppressSkillAndEnvEffect(obj)end
 	end)
 end
 
 workspace.DescendantRemoving:Connect(function(obj)
-	if mobCache[obj] then
-		mobCache[obj] = nil
-	end
+	if mobCache[obj]then mobCache[obj]=nil end
 end)
 
 player.Idled:Connect(function()
@@ -447,1157 +314,1005 @@ player.Idled:Connect(function()
 end)
 
 local function shouldUseAirPlatform()
-	if not isAnyCombatActive() then
-		return false
-	end
-	if State.MoveMode == "Walk" then
-		return (State.AttackPosition == "above" or State.AttackPosition == "below")
+	if not isAnyCombatActive() then return false end
+	if State.MoveMode=="Walk" then
+		return (State.AttackPosition=="above" or State.AttackPosition=="below")
 	end
 	return State.FreezeAnimOnActive
 end
 
-local function restoreCharacterCollision()
-	local char = player.Character
-	if not char then
-		return
-	end
-	for _, part in ipairs(char:GetDescendants()) do
-		if part:IsA("BasePart") and (
-			part.Name == "HumanoidRootPart" or part.Name == "Torso"
-			or part.Name == "UpperTorso" or part.Name == "LowerTorso" or part.Name == "Head"
-		) then
-			part.CanCollide = true
-		end
-	end
-end
-
 local function setCharacterFreezeAnim(shouldFreeze)
-	local char, _, hum = getCharacterParts()
-	if not char or not hum then
-		return
-	end
-	local animateScript = char:FindFirstChild("Animate")
+	local char,_,hum=getCharacterParts()
+	if not char or not hum then return end
+	local animateScript=char:FindFirstChild("Animate")
 	if animateScript and animateScript:IsA("LocalScript") then
-		animateScript.Disabled = shouldFreeze
+		animateScript.Disabled=shouldFreeze
 	end
-	hum.AutoRotate = not shouldFreeze
-	hum.PlatformStand = shouldFreeze
+	hum.AutoRotate=not shouldFreeze
+	hum.PlatformStand=shouldFreeze
 	if not shouldFreeze then
 		hum:ChangeState(Enum.HumanoidStateType.GettingUp)
 	else
-		local animator = hum:FindFirstChildOfClass("Animator")
+		local animator=hum:FindFirstChildOfClass("Animator")
 		if animator then
-			for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
-				track:Stop(0)
-			end
+			for _,track in ipairs(animator:GetPlayingAnimationTracks()) do track:Stop(0) end
 		end
-		for _, joint in ipairs(char:GetDescendants()) do
-			if joint:IsA("Motor6D") then
-				joint.Transform = CFrame.new()
-			end
+		for _,joint in ipairs(char:GetDescendants()) do
+			if joint:IsA("Motor6D") then joint.Transform=CFrame.new() end
 		end
 	end
 end
 
 local function refreshFreezeState()
 	setCharacterFreezeAnim(shouldUseAirPlatform())
-	if not isAnyCombatActive() and wasNoclipActive then
-		wasNoclipActive = false
-		restoreCharacterCollision()
-	end
 end
 
 local function bindCharacterEvents(char)
-	local hum = char:WaitForChild("Humanoid", 5)
-	if not hum then
-		return
-	end
-	local animator = hum:WaitForChild("Animator", 5)
-	if not animator then
-		return
-	end
+	local hum=char:WaitForChild("Humanoid",5)
+	if not hum then return end
+	local animator=hum:WaitForChild("Animator",5)
+	if not animator then return end
 	animator.AnimationPlayed:Connect(function(track)
-		if shouldUseAirPlatform() then
-			track:Stop(0)
-		end
+		if shouldUseAirPlatform() then track:Stop(0) end
 	end)
 	task.defer(refreshFreezeState)
 end
 
-if player.Character then
-	task.spawn(bindCharacterEvents, player.Character)
-end
+if player.Character then task.spawn(bindCharacterEvents,player.Character)end
 player.CharacterAdded:Connect(bindCharacterEvents)
 
-RunService.Stepped:Connect(function()
-	local char, _, hum = getCharacterParts()
-	if not char or not hum then
-		return
+-- Hệ thống Noclip cực mạnh chạy trên Stepped (trước physics) + khóa CanCollide
+local hookedNoclipParts=setmetatable({},{__mode="k"})
+local wasNoclipping=false
+local coreCollideNames={
+	HumanoidRootPart=true,
+	Torso=true,
+	UpperTorso=true,
+	LowerTorso=true,
+	Head=true
+}
+
+local function enforceStrongNoclip(char,hum)
+	if hum then
+		pcall(function()
+			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown,false)
+			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,false)
+		end)
 	end
+	for _,part in ipairs(char:GetDescendants())do
+		if part:IsA("BasePart")then
+			if part.CanCollide then
+				part.CanCollide=false
+			end
+			if not hookedNoclipParts[part]then
+				hookedNoclipParts[part]=true
+				part:GetPropertyChangedSignal("CanCollide"):Connect(function()
+					if shouldUseNoclip() and part.CanCollide then
+						part.CanCollide=false
+					end
+				end)
+			end
+		end
+	end
+end
+
+local function restoreNormalCollision(char,hrp,hum)
+	if hum then
+		pcall(function()
+			hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown,true)
+			hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll,true)
+		end)
+	end
+	if char then
+		for _,part in ipairs(char:GetDescendants())do
+			if part:IsA("BasePart") and coreCollideNames[part.Name] then
+				part.CanCollide=true
+			end
+		end
+	end
+	if hrp then
+		hrp.AssemblyLinearVelocity=Vector3.zero
+	end
+end
+
+RunService.Stepped:Connect(function()
+	local char,hrp,hum=getCharacterParts()
+	if not char or not hum then return end
 
 	if shouldUseAirPlatform() then
-		hum.PlatformStand = true
-		for _, joint in ipairs(char:GetDescendants()) do
-			if joint:IsA("Motor6D") then
-				joint.Transform = CFrame.new()
-			end
+		hum.PlatformStand=true
+		for _,joint in ipairs(char:GetDescendants()) do
+			if joint:IsA("Motor6D") then joint.Transform=CFrame.new() end
 		end
 	end
 
-	local needNoclip = isAnyCombatActive() and (
-		State.MoveMode == "Tween" or State.MoveMode == "Walk"
-		or (State.AttackPosition == "below" and State.BelowNoclip)
-	)
-	if needNoclip then
-		wasNoclipActive = true
-		for _, part in ipairs(char:GetDescendants()) do
-			if part:IsA("BasePart") then
-				part.CanCollide = false
-			end
-		end
-	elseif wasNoclipActive then
-		wasNoclipActive = false
-		restoreCharacterCollision()
+	if shouldUseNoclip() then
+		wasNoclipping=true
+		enforceStrongNoclip(char,hum)
+	elseif wasNoclipping then
+		wasNoclipping=false
+		restoreNormalCollision(char,hrp,hum)
 	end
 end)
 
 UserInputService.JumpRequest:Connect(function()
 	if State.InfJump then
-		local _, _, hum = getCharacterParts()
-		if hum then
-			hum:ChangeState(Enum.HumanoidStateType.Jumping)
-		end
+		local _,_,hum=getCharacterParts()
+		if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping)end
 	end
 end)
 
 local function performDash()
-	if not State.InfDash then
-		return
+	if not State.InfDash then return end
+	local _,hrp,hum=getCharacterParts()
+	if not hrp or not hum then return end
+	local moveDir=hum.MoveDirection
+	if moveDir.Magnitude<0.05 then
+		local look=hrp.CFrame.LookVector
+		local flat=Vector3.new(look.X,0,look.Z)
+		moveDir=(flat.Magnitude>0.001)and flat.Unit or Vector3.new(0,0,-1)
 	end
-	local _, hrp, hum = getCharacterParts()
-	if not hrp or not hum then
-		return
-	end
-	local moveDir = hum.MoveDirection
-	if moveDir.Magnitude < 0.05 then
-		local look = hrp.CFrame.LookVector
-		local flat = Vector3.new(look.X, 0, look.Z)
-		moveDir = (flat.Magnitude > 0.001) and flat.Unit or Vector3.new(0, 0, -1)
-	end
-	hrp.AssemblyLinearVelocity = Vector3.new(
-		moveDir.X * State.DashPower,
-		math.max(hrp.AssemblyLinearVelocity.Y, 12),
-		moveDir.Z * State.DashPower
-	)
+	hrp.AssemblyLinearVelocity=Vector3.new(moveDir.X*State.DashPower,math.max(hrp.AssemblyLinearVelocity.Y,12),moveDir.Z*State.DashPower)
 end
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-	if gameProcessed then
-		return
-	end
-	if input.KeyCode == Enum.KeyCode.Q then
-		performDash()
-	end
+UserInputService.InputBegan:Connect(function(input,gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode==Enum.KeyCode.Q then performDash()end
 end)
 
 local function findClosestAnyMob(maxRange)
-	local _, playerHRP = getCharacterParts()
-	if not playerHRP then
-		return nil, math.huge
-	end
-	local closestMob, closestDist = nil, maxRange
-	for obj in pairs(mobCache) do
-		local valid, _, mobHRP = isValidMob(obj)
+	local _,playerHRP=getCharacterParts()
+	if not playerHRP then return nil,math.huge end
+	local closestMob,closestDist=nil,maxRange
+	for obj in pairs(mobCache)do
+		local valid,_,mobHRP=isValidMob(obj)
 		if valid then
-			local dist = (mobHRP.Position - playerHRP.Position).Magnitude
-			if dist <= closestDist then
-				closestDist = dist
-				closestMob = obj
+			local dist=(mobHRP.Position-playerHRP.Position).Magnitude
+			if dist<=closestDist then
+				closestDist=dist
+				closestMob=obj
 			end
 		elseif not obj or not obj.Parent then
-			mobCache[obj] = nil
+			mobCache[obj]=nil
 		end
 	end
-	return closestMob, closestDist
+	return closestMob,closestDist
 end
 
 local function scanGroupedMobs(radius)
-	local _, playerHRP = getCharacterParts()
-	if not playerHRP then
-		return {}
-	end
-	local groups = {}
-	for obj in pairs(mobCache) do
-		local valid, _, mobHRP = isValidMob(obj)
+	local _,playerHRP=getCharacterParts()
+	if not playerHRP then return{}end
+	local groups={}
+	for obj in pairs(mobCache)do
+		local valid,_,mobHRP=isValidMob(obj)
 		if valid then
-			local dist = (mobHRP.Position - playerHRP.Position).Magnitude
-			if dist <= radius then
-				local name = obj.Name
-				if not groups[name] then
-					groups[name] = { Name = name, Count = 0, NearestDist = math.floor(dist) }
-				end
-				groups[name].Count = groups[name].Count + 1
-				if dist < groups[name].NearestDist then
-					groups[name].NearestDist = math.floor(dist)
-				end
+			local dist=(mobHRP.Position-playerHRP.Position).Magnitude
+			if dist<=radius then
+				local name=obj.Name
+				if not groups[name]then groups[name]={Name=name,Count=0,NearestDist=math.floor(dist)}end
+				groups[name].Count+=1
+				if dist<groups[name].NearestDist then groups[name].NearestDist=math.floor(dist)end
 			end
 		elseif not obj or not obj.Parent then
-			mobCache[obj] = nil
+			mobCache[obj]=nil
 		end
 	end
-	local result = {}
-	for _, info in pairs(groups) do
-		table.insert(result, info)
-	end
-	table.sort(result, function(a, b)
-		return a.NearestDist < b.NearestDist
-	end)
+	local result={}
+	for _,info in pairs(groups)do table.insert(result,info)end
+	table.sort(result,function(a,b)return a.NearestDist<b.NearestDist end)
 	return result
 end
 
-local function pickNearbyMobByName(mobName, maxRange)
-	local _, playerHRP = getCharacterParts()
-	if not playerHRP or not mobName then
-		return nil
-	end
-	local candidates = {}
-	for obj in pairs(mobCache) do
-		if obj and obj.Name == mobName then
-			local valid, _, mobHRP = isValidMob(obj)
+local function pickNearbyMobByName(mobName,maxRange)
+	local _,playerHRP=getCharacterParts()
+	if not playerHRP or not mobName then return nil end
+	local candidates={}
+	for obj in pairs(mobCache)do
+		if obj and obj.Name==mobName then
+			local valid,_,mobHRP=isValidMob(obj)
 			if valid then
-				local dist = (mobHRP.Position - playerHRP.Position).Magnitude
-				if dist <= maxRange then
-					table.insert(candidates, { Model = obj, Distance = dist })
-				end
+				local dist=(mobHRP.Position-playerHRP.Position).Magnitude
+				if dist<=maxRange then table.insert(candidates,{Model=obj,Distance=dist})end
 			end
 		end
 	end
-	if #candidates == 0 then
-		return nil
-	end
-	table.sort(candidates, function(a, b)
-		return a.Distance < b.Distance
-	end)
-	local poolSize = math.min(#candidates, 3)
-	local weights = { 60, 28, 12 }
-	local totalWeight = 0
-	for i = 1, poolSize do
-		totalWeight = totalWeight + weights[i]
-	end
-	local roll = math.random(1, totalWeight)
-	local acc = 0
-	for i = 1, poolSize do
-		acc = acc + weights[i]
-		if roll <= acc then
-			return candidates[i].Model
-		end
+	if#candidates==0 then return nil end
+	table.sort(candidates,function(a,b)return a.Distance<b.Distance end)
+	local poolSize=math.min(#candidates,3)
+	local weights={60,28,12}
+	local totalWeight=0
+	for i=1,poolSize do totalWeight+=weights[i]end
+	local roll=math.random(1,totalWeight)
+	local acc=0
+	for i=1,poolSize do
+		acc+=weights[i]
+		if roll<=acc then return candidates[i].Model end
 	end
 	return candidates[1].Model
 end
 
 local function stopTween()
-	if activeTween then
-		activeTween:Cancel()
-		activeTween = nil
-	end
+	if activeTween then activeTween:Cancel()activeTween=nil end
 end
 
 local function getAttackPositionCFrame(targetHRP)
-	local targetPos = targetHRP.Position
-	local lookDir = targetHRP.CFrame.LookVector
-	local flatDir = Vector3.new(lookDir.X, 0, lookDir.Z)
-	flatDir = (flatDir.Magnitude < 0.001) and Vector3.new(0, 0, -1) or flatDir.Unit
-
-	if State.AttackPosition == "above" then
-		local pos = targetPos + Vector3.new(0, State.VerticalOffset, 0)
-		return CFrame.lookAt(pos, pos + flatDir) * CFrame.Angles(math.rad(-State.AboveTiltAngle), 0, 0)
-	elseif State.AttackPosition == "below" then
-		local pos = targetPos - Vector3.new(0, State.VerticalOffset, 0)
-		return CFrame.lookAt(pos, pos + flatDir) * CFrame.Angles(math.rad(State.AboveTiltAngle), 0, 0)
-	elseif State.AttackPosition == "behind" then
-		return CFrame.lookAt(targetPos - (flatDir * State.HorizontalDist), targetPos)
-	elseif State.AttackPosition == "front" then
-		return CFrame.lookAt(targetPos + (flatDir * State.HorizontalDist), targetPos)
+	local targetPos=targetHRP.Position
+	local lookDir=targetHRP.CFrame.LookVector
+	local flatDir=Vector3.new(lookDir.X,0,lookDir.Z)
+	flatDir=(flatDir.Magnitude<0.001)and Vector3.new(0,0,-1)or flatDir.Unit
+	if State.AttackPosition=="above" then
+		local pos=targetPos+Vector3.new(0,State.VerticalOffset,0)
+		return CFrame.lookAt(pos,pos+flatDir)*CFrame.Angles(math.rad(-State.AboveTiltAngle),0,0)
+	elseif State.AttackPosition=="below" then
+		local pos=targetPos-Vector3.new(0,State.VerticalOffset,0)
+		return CFrame.lookAt(pos,pos+flatDir)*CFrame.Angles(math.rad(State.AboveTiltAngle),0,0)
+	elseif State.AttackPosition=="behind" then
+		return CFrame.lookAt(targetPos-(flatDir*State.HorizontalDist),targetPos)
+	elseif State.AttackPosition=="front" then
+		return CFrame.lookAt(targetPos+(flatDir*State.HorizontalDist),targetPos)
 	end
-	return targetHRP.CFrame * CFrame.new(0, 0, State.HorizontalDist)
+	return targetHRP.CFrame*CFrame.new(0,0,State.HorizontalDist)
 end
 
 local function moveToTarget(targetModel)
-	local valid, _, targetHRP = isValidMob(targetModel)
-	if not valid then
-		return
-	end
-	local _, playerHRP, playerHum = getCharacterParts()
-	if not playerHRP or not playerHum then
-		return
-	end
-	if State.MoveMode == "Walk" then
-		local goal = getAttackPositionCFrame(targetHRP)
+	local valid,_,targetHRP=isValidMob(targetModel)
+	if not valid then return end
+	local _,playerHRP,playerHum=getCharacterParts()
+	if not playerHRP or not playerHum then return end
+	if State.MoveMode=="Walk" then
+		local goal=getAttackPositionCFrame(targetHRP)
 		playerHum:MoveTo(goal.Position)
 	end
-	lastCombatPosition = playerHRP.Position
+	lastCombatPosition=playerHRP.Position
 end
 
 RunService.Heartbeat:Connect(function(dt)
-	local char, hrp, hum = getCharacterParts()
-	if not char or not hrp or not hum then
-		return
-	end
-	if not isAnyCombatActive() then
-		return
-	end
-	local valid, _, targetHRP = isValidMob(State.CurrentTarget)
-	if not valid then
-		return
-	end
+	local char,hrp,hum=getCharacterParts()
+	if not char or not hrp or not hum then return end
+	if not isAnyCombatActive() then return end
+	local valid,_,targetHRP=isValidMob(State.CurrentTarget)
+	if not valid then return end
 
-	local goal = getAttackPositionCFrame(targetHRP)
-	local mode = State.MoveMode
-	local offset = goal.Position - hrp.Position
-	local dist = offset.Magnitude
+	local goal=getAttackPositionCFrame(targetHRP)
+	local mode=State.MoveMode
+	local noclipActive=shouldUseNoclip()
+	local deltaTime=dt or (1/60)
 
-	if mode == "Teleport" then
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.AssemblyAngularVelocity = Vector3.zero
-		local stopThreshold = 4.5
-		if dist <= stopThreshold then
-			hrp.CFrame = CFrame.new(hrp.Position) * goal.Rotation
+	if mode=="Teleport" then
+		hrp.AssemblyLinearVelocity=Vector3.zero
+		hrp.AssemblyAngularVelocity=Vector3.zero
+		hrp.CFrame=goal
+	elseif mode=="Tween" then
+		hrp.AssemblyLinearVelocity=Vector3.zero
+		hrp.AssemblyAngularVelocity=Vector3.zero
+		local offset=goal.Position-hrp.Position
+		local dist=offset.Magnitude
+		local step=State.TweenSpeed*deltaTime
+		if dist<=step then
+			hrp.CFrame=goal
 		else
-			local now = tick()
-			if now - lastTpStep >= 0.1 then
-				lastTpStep = now
-				local maxHop = 45
-				if dist <= maxHop then
-					hrp.CFrame = goal
-				else
-					hrp.CFrame = CFrame.new(hrp.Position + offset.Unit * maxHop) * goal.Rotation
-				end
+			hrp.CFrame=CFrame.new(hrp.Position+offset.Unit*step)*goal.Rotation
+		end
+	elseif mode=="Walk" then
+		local isAirPos=(State.AttackPosition=="above" or State.AttackPosition=="below")
+		local flatGoal=Vector3.new(goal.Position.X,hrp.Position.Y,goal.Position.Z)
+		local flatOffset=flatGoal-hrp.Position
+		local flatDist=flatOffset.Magnitude
+
+		-- Chống tụt sàn và đồng bộ độ cao khi Walk + Noclip xuyên tường/trần
+		if noclipActive then
+			local vel=hrp.AssemblyLinearVelocity
+			if vel.Y<0 then
+				hrp.AssemblyLinearVelocity=Vector3.new(vel.X,0,vel.Z)
+			end
+			local yDiff=goal.Position.Y-hrp.Position.Y
+			if math.abs(yDiff)>0.35 then
+				local maxYStep=math.max(hum.WalkSpeed,24)*deltaTime
+				local yMove=math.clamp(yDiff,-maxYStep,maxYStep)
+				hrp.CFrame=hrp.CFrame+Vector3.new(0,yMove,0)
 			end
 		end
-	elseif mode == "Tween" then
-		hrp.AssemblyLinearVelocity = Vector3.zero
-		hrp.AssemblyAngularVelocity = Vector3.zero
-		local step = State.TweenSpeed * dt
-		if dist <= step then
-			hrp.CFrame = goal
-		else
-			hrp.CFrame = CFrame.new(hrp.Position + offset.Unit * step) * goal.Rotation
-		end
-	elseif mode == "Walk" then
-		local isAirPos = (State.AttackPosition == "above" or State.AttackPosition == "below")
-		local flatGoal = Vector3.new(goal.Position.X, hrp.Position.Y, goal.Position.Z)
-		local flatDist = (flatGoal - hrp.Position).Magnitude
 
 		if isAirPos then
-			if flatDist > 3.5 then
-				hum.PlatformStand = false
+			if flatDist>3.5 then
+				hum.PlatformStand=false
 				hum:MoveTo(flatGoal)
-				local flatVel = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z).Magnitude
-				if flatVel < 1.5 then
-					hum.Jump = true
+				if noclipActive and flatOffset.Magnitude>0.01 then
+					local assistSpeed=math.max(hum.WalkSpeed,16)*0.45*deltaTime
+					hrp.CFrame=hrp.CFrame+(flatOffset.Unit*math.min(assistSpeed,flatDist))
 				end
 			else
-				hum.PlatformStand = true
-				hrp.AssemblyLinearVelocity = Vector3.zero
-				hrp.AssemblyAngularVelocity = Vector3.zero
-				hrp.CFrame = goal
+				hum.PlatformStand=true
+				hrp.AssemblyLinearVelocity=Vector3.zero
+				hrp.AssemblyAngularVelocity=Vector3.zero
+				hrp.CFrame=goal
 			end
 		else
-			hum.PlatformStand = false
-			if flatDist > 2.5 then
+			hum.PlatformStand=false
+			if flatDist>2.5 then
 				hum:MoveTo(flatGoal)
-				local flatVel = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z).Magnitude
-				if flatVel < 1.5 then
-					hum.Jump = true
+				if noclipActive and flatOffset.Magnitude>0.01 then
+					local assistSpeed=math.max(hum.WalkSpeed,16)*0.45*deltaTime
+					hrp.CFrame=hrp.CFrame+(flatOffset.Unit*math.min(assistSpeed,flatDist))
 				end
 			else
-				hrp.CFrame = CFrame.new(hrp.Position, Vector3.new(targetHRP.Position.X, hrp.Position.Y, targetHRP.Position.Z))
+				hrp.CFrame=CFrame.new(hrp.Position,Vector3.new(targetHRP.Position.X,hrp.Position.Y,targetHRP.Position.Z))
 			end
 		end
 	end
 end)
 
--- ================= UI SETUP =================
-local guiParent = getSafeGuiParent()
-for _, container in ipairs({ guiParent, playerGui }) do
-	local old = container:FindFirstChild("MobCombatMasterUI")
-	if old then
-		old:Destroy()
-	end
-end
+local oldGui=playerGui:FindFirstChild("MobCombatMasterUI")
+if oldGui then oldGui:Destroy()end
 
-local screenGui = Instance.new("ScreenGui")
-screenGui.Name = "MobCombatMasterUI"
-screenGui.ResetOnSpawn = false
-screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screenGui.DisplayOrder = 999999
-screenGui.IgnoreGuiInset = true
-screenGui.Parent = guiParent
+local screenGui=Instance.new("ScreenGui")
+screenGui.Name="MobCombatMasterUI"
+screenGui.ResetOnSpawn=false
+screenGui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling
+screenGui.DisplayOrder=2147483647
+screenGui.IgnoreGuiInset=true
+screenGui.Parent=playerGui
 
-local uiScale = Instance.new("UIScale")
-uiScale.Parent = screenGui
+local uiScale=Instance.new("UIScale")
+uiScale.Parent=screenGui
 
 local function updateResponsiveScale()
-	local cam = workspace.CurrentCamera
-	local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
-	local minSide = math.min(vp.X, vp.Y)
-	if minSide < 420 then
-		uiScale.Scale = 0.84
-	elseif minSide < 600 then
-		uiScale.Scale = 0.92
-	else
-		uiScale.Scale = 1.0
-	end
+	local cam=workspace.CurrentCamera
+	local vp=cam and cam.ViewportSize or Vector2.new(1280,720)
+	local minSide=math.min(vp.X,vp.Y)
+	if minSide<420 then uiScale.Scale=0.84
+	elseif minSide<600 then uiScale.Scale=0.92
+	else uiScale.Scale=1.0 end
 end
 updateResponsiveScale()
 if workspace.CurrentCamera then
 	workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(updateResponsiveScale)
 end
 
-local Theme = {
-	Bg = Color3.fromRGB(16, 18, 26),
-	Sidebar = Color3.fromRGB(22, 25, 36),
-	Card = Color3.fromRGB(28, 32, 46),
-	Control = Color3.fromRGB(36, 41, 58),
-	ControlHover = Color3.fromRGB(48, 55, 76),
-	Accent = Color3.fromRGB(56, 152, 255),
-	Success = Color3.fromRGB(46, 204, 113),
-	Warning = Color3.fromRGB(241, 196, 15),
-	Text = Color3.fromRGB(242, 245, 252),
-	SubText = Color3.fromRGB(155, 164, 188),
-	Stroke = Color3.fromRGB(48, 55, 76)
+local Theme={
+	Bg=Color3.fromRGB(16,18,26),
+	Sidebar=Color3.fromRGB(22,25,36),
+	Card=Color3.fromRGB(28,32,46),
+	Control=Color3.fromRGB(36,41,58),
+	ControlHover=Color3.fromRGB(48,55,76),
+	Accent=Color3.fromRGB(56,152,255),
+	Success=Color3.fromRGB(46,204,113),
+	Warning=Color3.fromRGB(241,196,15),
+	Text=Color3.fromRGB(242,245,252),
+	SubText=Color3.fromRGB(155,164,188),
+	Stroke=Color3.fromRGB(48,55,76)
 }
 
-local toggleIcon = Instance.new("TextButton")
-toggleIcon.Name = "ToggleIcon"
-toggleIcon.Size = UDim2.new(0, 50, 0, 50)
-toggleIcon.Position = UDim2.new(0, 16, 0.42, 0)
-toggleIcon.BackgroundColor3 = Theme.Sidebar
-toggleIcon.Text = "⚔️"
-toggleIcon.TextSize = 22
-toggleIcon.TextColor3 = Theme.Text
-toggleIcon.AutoButtonColor = false
-toggleIcon.Active = true
-toggleIcon.ZIndex = 999
-toggleIcon.Parent = screenGui
-Instance.new("UICorner", toggleIcon).CornerRadius = UDim.new(1, 0)
+local toggleIcon=Instance.new("TextButton")
+toggleIcon.Name="ToggleIcon"
+toggleIcon.Size=UDim2.new(0,50,0,50)
+toggleIcon.Position=UDim2.new(0,16,0.42,0)
+toggleIcon.BackgroundColor3=Theme.Sidebar
+toggleIcon.Text="⚔️"
+toggleIcon.TextSize=22
+toggleIcon.TextColor3=Theme.Text
+toggleIcon.AutoButtonColor=false
+toggleIcon.Active=true
+toggleIcon.ZIndex=999
+toggleIcon.Parent=screenGui
+Instance.new("UICorner",toggleIcon).CornerRadius=UDim.new(1,0)
+local iconStroke=Instance.new("UIStroke",toggleIcon)
+iconStroke.Color=Theme.Accent
+iconStroke.Thickness=2.2
 
-local iconStroke = Instance.new("UIStroke", toggleIcon)
-iconStroke.Color = Theme.Accent
-iconStroke.Thickness = 2.2
+local dashFloatBtn=Instance.new("TextButton")
+dashFloatBtn.Name="DashButton"
+dashFloatBtn.Size=UDim2.new(0,56,0,56)
+dashFloatBtn.Position=UDim2.new(1,-82,0.46,0)
+dashFloatBtn.BackgroundColor3=Theme.Accent
+dashFloatBtn.Text="💨 Dash"
+dashFloatBtn.TextSize=11.5
+dashFloatBtn.Font=Enum.Font.GothamBold
+dashFloatBtn.TextColor3=Color3.new(1,1,1)
+dashFloatBtn.Visible=State.InfDash
+dashFloatBtn.Active=true
+dashFloatBtn.ZIndex=998
+dashFloatBtn.Parent=screenGui
+Instance.new("UICorner",dashFloatBtn).CornerRadius=UDim.new(1,0)
+local dashStroke=Instance.new("UIStroke",dashFloatBtn)
+dashStroke.Color=Color3.new(1,1,1)
+dashStroke.Thickness=1.5
 
-local dashFloatBtn = Instance.new("TextButton")
-dashFloatBtn.Name = "DashButton"
-dashFloatBtn.Size = UDim2.new(0, 56, 0, 56)
-dashFloatBtn.Position = UDim2.new(1, -82, 0.46, 0)
-dashFloatBtn.BackgroundColor3 = Theme.Accent
-dashFloatBtn.Text = "💨 Dash"
-dashFloatBtn.TextSize = 11.5
-dashFloatBtn.Font = Enum.Font.GothamBold
-dashFloatBtn.TextColor3 = Color3.new(1, 1, 1)
-dashFloatBtn.Visible = State.InfDash
-dashFloatBtn.Active = true
-dashFloatBtn.ZIndex = 998
-dashFloatBtn.Parent = screenGui
-Instance.new("UICorner", dashFloatBtn).CornerRadius = UDim.new(1, 0)
+local menuWidth=isMobile and 375 or 415
+local menuHeight=isMobile and 325 or 365
 
-local dashStroke = Instance.new("UIStroke", dashFloatBtn)
-dashStroke.Color = Color3.new(1, 1, 1)
-dashStroke.Thickness = 1.5
+local mainFrame=Instance.new("Frame")
+mainFrame.Name="MainFrame"
+mainFrame.Size=UDim2.new(0,menuWidth,0,menuHeight)
+mainFrame.Position=UDim2.new(0.5,-math.floor(menuWidth/2),0.5,-math.floor(menuHeight/2))
+mainFrame.BackgroundColor3=Theme.Bg
+mainFrame.BorderSizePixel=0
+mainFrame.ClipsDescendants=true
+mainFrame.Active=true
+mainFrame.ZIndex=900
+mainFrame.Parent=screenGui
+Instance.new("UICorner",mainFrame).CornerRadius=UDim.new(0,12)
+local mainStroke=Instance.new("UIStroke",mainFrame)
+mainStroke.Color=Theme.Stroke
+mainStroke.Thickness=1.5
 
-local menuWidth = isMobile and 375 or 415
-local menuHeight = isMobile and 325 or 365
+local topBar=Instance.new("Frame")
+topBar.Size=UDim2.new(1,0,0,38)
+topBar.BackgroundColor3=Theme.Sidebar
+topBar.BorderSizePixel=0
+topBar.Active=true
+topBar.Parent=mainFrame
 
-local mainFrame = Instance.new("Frame")
-mainFrame.Name = "MainFrame"
-mainFrame.Size = UDim2.new(0, menuWidth, 0, menuHeight)
-mainFrame.Position = UDim2.new(0.5, -math.floor(menuWidth / 2), 0.5, -math.floor(menuHeight / 2))
-mainFrame.BackgroundColor3 = Theme.Bg
-mainFrame.BorderSizePixel = 0
-mainFrame.ClipsDescendants = true
-mainFrame.Active = true
-mainFrame.ZIndex = 900
-mainFrame.Parent = screenGui
-Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 12)
+local titleLabel=Instance.new("TextLabel")
+titleLabel.Size=UDim2.new(1,-50,1,0)
+titleLabel.Position=UDim2.new(0,14,0,0)
+titleLabel.BackgroundTransparency=1
+titleLabel.Text="⚔️  9pre Hub"
+titleLabel.TextColor3=Theme.Text
+titleLabel.Font=Enum.Font.GothamBold
+titleLabel.TextSize=14
+titleLabel.TextXAlignment=Enum.TextXAlignment.Left
+titleLabel.Parent=topBar
 
-local mainStroke = Instance.new("UIStroke", mainFrame)
-mainStroke.Color = Theme.Stroke
-mainStroke.Thickness = 1.5
+local hideBtn=Instance.new("TextButton")
+hideBtn.Size=UDim2.new(0,28,0,28)
+hideBtn.Position=UDim2.new(1,-34,0.5,-14)
+hideBtn.BackgroundColor3=Theme.Control
+hideBtn.Text="—"
+hideBtn.TextColor3=Theme.SubText
+hideBtn.Font=Enum.Font.GothamBold
+hideBtn.TextSize=14
+hideBtn.Parent=topBar
+Instance.new("UICorner",hideBtn).CornerRadius=UDim.new(0,6)
 
-local topBar = Instance.new("Frame")
-topBar.Size = UDim2.new(1, 0, 0, 38)
-topBar.BackgroundColor3 = Theme.Sidebar
-topBar.BorderSizePixel = 0
-topBar.Active = true
-topBar.Parent = mainFrame
+local iconRailWidth=64
+local iconRail=Instance.new("Frame")
+iconRail.Name="LeftIconRail"
+iconRail.Size=UDim2.new(0,iconRailWidth,1,-38)
+iconRail.Position=UDim2.new(0,0,0,38)
+iconRail.BackgroundColor3=Theme.Sidebar
+iconRail.BorderSizePixel=0
+iconRail.Parent=mainFrame
 
-local titleLabel = Instance.new("TextLabel")
-titleLabel.Size = UDim2.new(1, -50, 1, 0)
-titleLabel.Position = UDim2.new(0, 14, 0, 0)
-titleLabel.BackgroundTransparency = 1
-titleLabel.Text = "⚔️  9pre Hub"
-titleLabel.TextColor3 = Theme.Text
-titleLabel.Font = Enum.Font.GothamBold
-titleLabel.TextSize = 14
-titleLabel.TextXAlignment = Enum.TextXAlignment.Left
-titleLabel.Parent = topBar
+local railDivider=Instance.new("Frame")
+railDivider.Size=UDim2.new(0,1,1,-38)
+railDivider.Position=UDim2.new(0,iconRailWidth,0,38)
+railDivider.BackgroundColor3=Theme.Stroke
+railDivider.BorderSizePixel=0
+railDivider.Parent=mainFrame
 
-local hideBtn = Instance.new("TextButton")
-hideBtn.Size = UDim2.new(0, 28, 0, 28)
-hideBtn.Position = UDim2.new(1, -34, 0.5, -14)
-hideBtn.BackgroundColor3 = Theme.Control
-hideBtn.Text = "—"
-hideBtn.TextColor3 = Theme.SubText
-hideBtn.Font = Enum.Font.GothamBold
-hideBtn.TextSize = 14
-hideBtn.Parent = topBar
-Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 6)
+local railLayout=Instance.new("UIListLayout",iconRail)
+railLayout.Padding=UDim.new(0,6)
+railLayout.HorizontalAlignment=Enum.HorizontalAlignment.Center
+railLayout.SortOrder=Enum.SortOrder.LayoutOrder
 
-local iconRailWidth = 64
-local iconRail = Instance.new("Frame")
-iconRail.Name = "LeftIconRail"
-iconRail.Size = UDim2.new(0, iconRailWidth, 1, -38)
-iconRail.Position = UDim2.new(0, 0, 0, 38)
-iconRail.BackgroundColor3 = Theme.Sidebar
-iconRail.BorderSizePixel = 0
-iconRail.Parent = mainFrame
+local railPad=Instance.new("UIPadding",iconRail)
+railPad.PaddingTop=UDim.new(0,8)
+railPad.PaddingBottom=UDim.new(0,8)
 
-local railDivider = Instance.new("Frame")
-railDivider.Size = UDim2.new(0, 1, 1, -38)
-railDivider.Position = UDim2.new(0, iconRailWidth, 0, 38)
-railDivider.BackgroundColor3 = Theme.Stroke
-railDivider.BorderSizePixel = 0
-railDivider.Parent = mainFrame
+local rightPagesHolder=Instance.new("Frame")
+rightPagesHolder.Name="RightContent"
+rightPagesHolder.Size=UDim2.new(1,-(iconRailWidth+1),1,-38)
+rightPagesHolder.Position=UDim2.new(0,iconRailWidth+1,0,38)
+rightPagesHolder.BackgroundTransparency=1
+rightPagesHolder.Parent=mainFrame
 
-local railLayout = Instance.new("UIListLayout", iconRail)
-railLayout.Padding = UDim.new(0, 6)
-railLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-railLayout.SortOrder = Enum.SortOrder.LayoutOrder
-
-local railPad = Instance.new("UIPadding", iconRail)
-railPad.PaddingTop = UDim.new(0, 8)
-railPad.PaddingBottom = UDim.new(0, 8)
-
-local rightPagesHolder = Instance.new("Frame")
-rightPagesHolder.Name = "RightContent"
-rightPagesHolder.Size = UDim2.new(1, -(iconRailWidth + 1), 1, -38)
-rightPagesHolder.Position = UDim2.new(0, iconRailWidth + 1, 0, 38)
-rightPagesHolder.BackgroundTransparency = 1
-rightPagesHolder.Parent = mainFrame
-
-local iconTabButtons = {}
-local iconTabPages = {}
+local iconTabButtons={}
+local iconTabPages={}
 
 local function selectIconTab(tabId)
-	State.ActiveTab = tabId
-	for id, page in pairs(iconTabPages) do
-		local isSelected = (id == tabId)
-		page.Visible = isSelected
-		local btnInfo = iconTabButtons[id]
+	State.ActiveTab=tabId
+	for id,page in pairs(iconTabPages)do
+		local isSelected=(id==tabId)
+		page.Visible=isSelected
+		local btnInfo=iconTabButtons[id]
 		if btnInfo then
-			btnInfo.Button.BackgroundColor3 = isSelected and Theme.Accent or Theme.Card
-			btnInfo.Indicator.Visible = isSelected
-			btnInfo.Label.TextColor3 = isSelected and Color3.new(1, 1, 1) or Theme.SubText
+			btnInfo.Button.BackgroundColor3=isSelected and Theme.Accent or Theme.Card
+			btnInfo.Indicator.Visible=isSelected
+			btnInfo.Label.TextColor3=isSelected and Color3.new(1,1,1)or Theme.SubText
 		end
 	end
 end
 
-local function createIconTab(order, tabId, iconEmoji, shortName)
-	local iconBox = Instance.new("TextButton")
-	iconBox.Name = tabId .. "Icon"
-	iconBox.Size = UDim2.new(0, 50, 0, 46)
-	iconBox.BackgroundColor3 = Theme.Card
-	iconBox.Text = ""
-	iconBox.AutoButtonColor = false
-	iconBox.LayoutOrder = order
-	iconBox.Parent = iconRail
-	Instance.new("UICorner", iconBox).CornerRadius = UDim.new(0, 9)
+local function createIconTab(order,tabId,iconEmoji,shortName)
+	local iconBox=Instance.new("TextButton")
+	iconBox.Name=tabId .. "Icon"
+	iconBox.Size=UDim2.new(0,50,0,46)
+	iconBox.BackgroundColor3=Theme.Card
+	iconBox.Text=""
+	iconBox.AutoButtonColor=false
+	iconBox.LayoutOrder=order
+	iconBox.Parent=iconRail
+	Instance.new("UICorner",iconBox).CornerRadius=UDim.new(0,9)
 
-	local indicator = Instance.new("Frame")
-	indicator.Size = UDim2.new(0, 3, 0, 22)
-	indicator.Position = UDim2.new(0, 0, 0.5, -11)
-	indicator.BackgroundColor3 = Color3.new(1, 1, 1)
-	indicator.BorderSizePixel = 0
-	indicator.Visible = false
-	indicator.Parent = iconBox
-	Instance.new("UICorner", indicator).CornerRadius = UDim.new(1, 0)
+	local indicator=Instance.new("Frame")
+	indicator.Size=UDim2.new(0,3,0,22)
+	indicator.Position=UDim2.new(0,0,0.5,-11)
+	indicator.BackgroundColor3=Color3.new(1,1,1)
+	indicator.BorderSizePixel=0
+	indicator.Visible=false
+	indicator.Parent=iconBox
+	Instance.new("UICorner",indicator).CornerRadius=UDim.new(1,0)
 
-	local emojiLbl = Instance.new("TextLabel")
-	emojiLbl.Size = UDim2.new(1, 0, 0, 24)
-	emojiLbl.Position = UDim2.new(0, 0, 0, 3)
-	emojiLbl.BackgroundTransparency = 1
-	emojiLbl.Text = iconEmoji
-	emojiLbl.TextSize = 17
-	emojiLbl.TextColor3 = Theme.Text
-	emojiLbl.Parent = iconBox
+	local emojiLbl=Instance.new("TextLabel")
+	emojiLbl.Size=UDim2.new(1,0,0,24)
+	emojiLbl.Position=UDim2.new(0,0,0,3)
+	emojiLbl.BackgroundTransparency=1
+	emojiLbl.Text=iconEmoji
+	emojiLbl.TextSize=17
+	emojiLbl.TextColor3=Theme.Text
+	emojiLbl.Parent=iconBox
 
-	local nameLbl = Instance.new("TextLabel")
-	nameLbl.Size = UDim2.new(1, -4, 0, 14)
-	nameLbl.Position = UDim2.new(0, 2, 1, -17)
-	nameLbl.BackgroundTransparency = 1
-	nameLbl.Text = shortName
-	nameLbl.Font = Enum.Font.GothamBold
-	nameLbl.TextSize = 9.5
-	nameLbl.TextColor3 = Theme.SubText
-	nameLbl.Parent = iconBox
+	local nameLbl=Instance.new("TextLabel")
+	nameLbl.Size=UDim2.new(1,-4,0,14)
+	nameLbl.Position=UDim2.new(0,2,1,-17)
+	nameLbl.BackgroundTransparency=1
+	nameLbl.Text=shortName
+	nameLbl.Font=Enum.Font.GothamBold
+	nameLbl.TextSize=9.5
+	nameLbl.TextColor3=Theme.SubText
+	nameLbl.Parent=iconBox
 
-	local page = Instance.new("ScrollingFrame")
-	page.Name = tabId .. "Page"
-	page.Size = UDim2.new(1, 0, 1, 0)
-	page.BackgroundTransparency = 1
-	page.BorderSizePixel = 0
-	page.ScrollBarThickness = isMobile and 4 or 3
-	page.ScrollBarImageColor3 = Theme.Accent
-	page.AutomaticCanvasSize = Enum.AutomaticSize.Y
-	page.CanvasSize = UDim2.new(0, 0, 0, 0)
-	page.Visible = false
-	page.Parent = rightPagesHolder
+	local page=Instance.new("ScrollingFrame")
+	page.Name=tabId .. "Page"
+	page.Size=UDim2.new(1,0,1,0)
+	page.BackgroundTransparency=1
+	page.BorderSizePixel=0
+	page.ScrollBarThickness=isMobile and 4 or 3
+	page.ScrollBarImageColor3=Theme.Accent
+	page.AutomaticCanvasSize=Enum.AutomaticSize.Y
+	page.CanvasSize=UDim2.new(0,0,0,0)
+	page.Visible=false
+	page.Parent=rightPagesHolder
 
-	local pLayout = Instance.new("UIListLayout", page)
-	pLayout.Padding = UDim.new(0, 7)
-	pLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	local pLayout=Instance.new("UIListLayout",page)
+	pLayout.Padding=UDim.new(0,7)
+	pLayout.SortOrder=Enum.SortOrder.LayoutOrder
 
-	local pPad = Instance.new("UIPadding", page)
-	pPad.PaddingTop = UDim.new(0, 10)
-	pPad.PaddingBottom = UDim.new(0, 12)
-	pPad.PaddingLeft = UDim.new(0, 10)
-	pPad.PaddingRight = UDim.new(0, 12)
+	local pPad=Instance.new("UIPadding",page)
+	pPad.PaddingTop=UDim.new(0,10)
+	pPad.PaddingBottom=UDim.new(0,12)
+	pPad.PaddingLeft=UDim.new(0,10)
+	pPad.PaddingRight=UDim.new(0,12)
 
-	iconTabButtons[tabId] = { Button = iconBox, Indicator = indicator, Label = nameLbl }
-	iconTabPages[tabId] = page
-
-	iconBox.MouseButton1Click:Connect(function()
-		selectIconTab(tabId)
-	end)
-
+	iconTabButtons[tabId]={Button=iconBox,Indicator=indicator,Label=nameLbl}
+	iconTabPages[tabId]=page
+	iconBox.MouseButton1Click:Connect(function()selectIconTab(tabId)end)
 	return page
 end
 
-local function addSectionTitle(parent, text)
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.new(1, 0, 0, 18)
-	lbl.BackgroundTransparency = 1
-	lbl.Text = text
-	lbl.TextColor3 = Theme.Accent
-	lbl.Font = Enum.Font.GothamBold
-	lbl.TextSize = 11.5
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Parent = parent
+local function addSectionTitle(parent,text)
+	local lbl=Instance.new("TextLabel")
+	lbl.Size=UDim2.new(1,0,0,18)
+	lbl.BackgroundTransparency=1
+	lbl.Text=text
+	lbl.TextColor3=Theme.Accent
+	lbl.Font=Enum.Font.GothamBold
+	lbl.TextSize=11.5
+	lbl.TextXAlignment=Enum.TextXAlignment.Left
+	lbl.Parent=parent
 	return lbl
 end
 
-local function addToggleRow(parent, text, defaultVal, callback)
-	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, 0, 0, 36)
-	row.BackgroundColor3 = Theme.Card
-	row.Parent = parent
-	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+local function addToggleRow(parent,text,defaultVal,callback)
+	local row=Instance.new("Frame")
+	row.Size=UDim2.new(1,0,0,36)
+	row.BackgroundColor3=Theme.Card
+	row.Parent=parent
+	Instance.new("UICorner",row).CornerRadius=UDim.new(0,7)
 
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.new(1, -60, 1, 0)
-	lbl.Position = UDim2.new(0, 10, 0, 0)
-	lbl.BackgroundTransparency = 1
-	lbl.Text = text
-	lbl.TextColor3 = Theme.Text
-	lbl.Font = Enum.Font.GothamSemibold
-	lbl.TextSize = 11.5
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Parent = row
+	local lbl=Instance.new("TextLabel")
+	lbl.Size=UDim2.new(1,-60,1,0)
+	lbl.Position=UDim2.new(0,10,0,0)
+	lbl.BackgroundTransparency=1
+	lbl.Text=text
+	lbl.TextColor3=Theme.Text
+	lbl.Font=Enum.Font.GothamSemibold
+	lbl.TextSize=11.5
+	lbl.TextXAlignment=Enum.TextXAlignment.Left
+	lbl.Parent=row
 
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(0, 46, 0, 24)
-	btn.Position = UDim2.new(1, -52, 0.5, -12)
-	btn.BackgroundColor3 = defaultVal and Theme.Success or Color3.fromRGB(58, 65, 85)
-	btn.Text = defaultVal and "BẬT" or "TẮT"
-	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 10
-	btn.Parent = row
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 5)
+	local btn=Instance.new("TextButton")
+	btn.Size=UDim2.new(0,46,0,24)
+	btn.Position=UDim2.new(1,-52,0.5,-12)
+	btn.BackgroundColor3=defaultVal and Theme.Success or Color3.fromRGB(58,65,85)
+	btn.Text=defaultVal and "BẬT" or "TẮT"
+	btn.TextColor3=Color3.new(1,1,1)
+	btn.Font=Enum.Font.GothamBold
+	btn.TextSize=10
+	btn.Parent=row
+	Instance.new("UICorner",btn).CornerRadius=UDim.new(0,5)
 
-	local state = defaultVal
-	local function setVisual(newState, fireCb)
-		state = newState
-		btn.Text = state and "BẬT" or "TẮT"
-		btn.BackgroundColor3 = state and Theme.Success or Color3.fromRGB(58, 65, 85)
-		if fireCb and callback then
-			callback(state)
-		end
+	local state=defaultVal
+	local function setVisual(newState,fireCb)
+		state=newState
+		btn.Text=state and "BẬT" or "TẮT"
+		btn.BackgroundColor3=state and Theme.Success or Color3.fromRGB(58,65,85)
+		if fireCb and callback then callback(state)end
 	end
-
-	btn.MouseButton1Click:Connect(function()
-		setVisual(not state, true)
-	end)
-
+	btn.MouseButton1Click:Connect(function()setVisual(not state,true)end)
 	return setVisual
 end
 
-local function addStepperRow(parent, labelText, formatFn, initVal, step, minVal, maxVal, callback)
-	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, 0, 0, 36)
-	row.BackgroundColor3 = Theme.Card
-	row.Parent = parent
-	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+local function addStepperRow(parent,labelText,formatFn,initVal,step,minVal,maxVal,callback)
+	local row=Instance.new("Frame")
+	row.Size=UDim2.new(1,0,0,36)
+	row.BackgroundColor3=Theme.Card
+	row.Parent=parent
+	Instance.new("UICorner",row).CornerRadius=UDim.new(0,7)
 
-	local val = initVal
-	local lbl = Instance.new("TextLabel")
-	lbl.Size = UDim2.new(1, -80, 1, 0)
-	lbl.Position = UDim2.new(0, 10, 0, 0)
-	lbl.BackgroundTransparency = 1
-	lbl.Text = labelText .. ": " .. formatFn(val)
-	lbl.TextColor3 = Theme.Text
-	lbl.Font = Enum.Font.GothamSemibold
-	lbl.TextSize = 11.5
-	lbl.TextXAlignment = Enum.TextXAlignment.Left
-	lbl.Parent = row
+	local val=initVal
+	local lbl=Instance.new("TextLabel")
+	lbl.Size=UDim2.new(1,-80,1,0)
+	lbl.Position=UDim2.new(0,10,0,0)
+	lbl.BackgroundTransparency=1
+	lbl.Text=labelText .. ": " .. formatFn(val)
+	lbl.TextColor3=Theme.Text
+	lbl.Font=Enum.Font.GothamSemibold
+	lbl.TextSize=11.5
+	lbl.TextXAlignment=Enum.TextXAlignment.Left
+	lbl.Parent=row
 
-	local minus = Instance.new("TextButton")
-	minus.Size = UDim2.new(0, 28, 0, 24)
-	minus.Position = UDim2.new(1, -64, 0.5, -12)
-	minus.BackgroundColor3 = Theme.ControlHover
-	minus.Text = "-"
-	minus.TextColor3 = Theme.Text
-	minus.Font = Enum.Font.GothamBold
-	minus.TextSize = 15
-	minus.Parent = row
-	Instance.new("UICorner", minus).CornerRadius = UDim.new(0, 5)
+	local minus=Instance.new("TextButton")
+	minus.Size=UDim2.new(0,28,0,24)
+	minus.Position=UDim2.new(1,-64,0.5,-12)
+	minus.BackgroundColor3=Theme.ControlHover
+	minus.Text="-"
+	minus.TextColor3=Theme.Text
+	minus.Font=Enum.Font.GothamBold
+	minus.TextSize=15
+	minus.Parent=row
+	Instance.new("UICorner",minus).CornerRadius=UDim.new(0,5)
 
-	local plus = Instance.new("TextButton")
-	plus.Size = UDim2.new(0, 28, 0, 24)
-	plus.Position = UDim2.new(1, -32, 0.5, -12)
-	plus.BackgroundColor3 = Theme.ControlHover
-	plus.Text = "+"
-	plus.TextColor3 = Theme.Text
-	plus.Font = Enum.Font.GothamBold
-	plus.TextSize = 15
-	plus.Parent = row
-	Instance.new("UICorner", plus).CornerRadius = UDim.new(0, 5)
+	local plus=Instance.new("TextButton")
+	plus.Size=UDim2.new(0,28,0,24)
+	plus.Position=UDim2.new(1,-32,0.5,-12)
+	plus.BackgroundColor3=Theme.ControlHover
+	plus.Text="+"
+	plus.TextColor3=Theme.Text
+	plus.Font=Enum.Font.GothamBold
+	plus.TextSize=15
+	plus.Parent=row
+	Instance.new("UICorner",plus).CornerRadius=UDim.new(0,5)
 
 	local function setVal(newV)
-		val = math.clamp(math.floor(newV * 100 + 0.5) / 100, minVal, maxVal)
-		lbl.Text = labelText .. ": " .. formatFn(val)
+		val=math.clamp(math.floor(newV*100+0.5)/100,minVal,maxVal)
+		lbl.Text=labelText .. ": " .. formatFn(val)
 		callback(val)
 	end
-
-	minus.MouseButton1Click:Connect(function()
-		setVal(val - step)
-	end)
-	plus.MouseButton1Click:Connect(function()
-		setVal(val + step)
-	end)
+	minus.MouseButton1Click:Connect(function()setVal(val-step)end)
+	plus.MouseButton1Click:Connect(function()setVal(val+step)end)
 end
 
-local function addActionButton(parent, text, color, callback)
-	local btn = Instance.new("TextButton")
-	btn.Size = UDim2.new(1, 0, 0, 34)
-	btn.BackgroundColor3 = color or Theme.Accent
-	btn.Text = text
-	btn.TextColor3 = Color3.new(1, 1, 1)
-	btn.Font = Enum.Font.GothamBold
-	btn.TextSize = 11.5
-	btn.Parent = parent
-	Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
-	btn.MouseButton1Click:Connect(function()
-		callback(btn)
-	end)
+local function addActionButton(parent,text,color,callback)
+	local btn=Instance.new("TextButton")
+	btn.Size=UDim2.new(1,0,0,34)
+	btn.BackgroundColor3=color or Theme.Accent
+	btn.Text=text
+	btn.TextColor3=Color3.new(1,1,1)
+	btn.Font=Enum.Font.GothamBold
+	btn.TextSize=11.5
+	btn.Parent=parent
+	Instance.new("UICorner",btn).CornerRadius=UDim.new(0,6)
+	btn.MouseButton1Click:Connect(function()callback(btn)end)
 	return btn
 end
 
-local combatPage = createIconTab(1, "Combat", "⚔️", "Combat")
-local farmPage = createIconTab(2, "Farm", "👾", "Farm")
-local movePage = createIconTab(3, "Move", "🚀", "Move")
-local playerPage = createIconTab(4, "Player", "🏃", "Player")
-local visualPage = createIconTab(5, "Visual", "👁️", "Visual")
+local combatPage=createIconTab(1,"Combat","⚔️","Combat")
+local farmPage=createIconTab(2,"Farm","👾","Farm")
+local movePage=createIconTab(3,"Move","🚀","Move")
+local playerPage=createIconTab(4,"Player","🏃","Player")
+local visualPage=createIconTab(5,"Visual","👁️","Visual")
 selectIconTab("Combat")
 
-local setAutoSkillVisual, setAutoFarmVisual, setAutoMissionVisual
+local setAutoSkillVisual,setAutoFarmVisual,setAutoMissionVisual
 
-addSectionTitle(combatPage, "✨ Auto Skill")
-setAutoSkillVisual = addToggleRow(combatPage, "Auto Skill", State.AutoSkill, function(v)
-	State.AutoSkill = v
-end)
+addSectionTitle(combatPage,"✨ Auto Skill")
+setAutoSkillVisual=addToggleRow(combatPage,"Auto Skill",State.AutoSkill,function(v)State.AutoSkill=v end)
 
-local skillHint = Instance.new("TextLabel")
-skillHint.Size = UDim2.new(1, 0, 0, 16)
-skillHint.BackgroundTransparency = 1
-skillHint.Text = "Chọn các skill tự động:"
-skillHint.TextColor3 = Theme.SubText
-skillHint.Font = Enum.Font.Gotham
-skillHint.TextSize = 11
-skillHint.TextXAlignment = Enum.TextXAlignment.Left
-skillHint.Parent = combatPage
+local skillHint=Instance.new("TextLabel")
+skillHint.Size=UDim2.new(1,0,0,16)
+skillHint.BackgroundTransparency=1
+skillHint.Text="Chọn các skill tự động:"
+skillHint.TextColor3=Theme.SubText
+skillHint.Font=Enum.Font.Gotham
+skillHint.TextSize=11
+skillHint.TextXAlignment=Enum.TextXAlignment.Left
+skillHint.Parent=combatPage
 
-local skillRow = Instance.new("Frame")
-skillRow.Size = UDim2.new(1, 0, 0, 34)
-skillRow.BackgroundTransparency = 1
-skillRow.Parent = combatPage
+local skillRow=Instance.new("Frame")
+skillRow.Size=UDim2.new(1,0,0,34)
+skillRow.BackgroundTransparency=1
+skillRow.Parent=combatPage
 
-local skillGrid = Instance.new("UIGridLayout", skillRow)
-skillGrid.CellSize = UDim2.new(0.184, 0, 1, 0)
-skillGrid.CellPadding = UDim2.new(0.02, 0, 0, 0)
+local skillGrid=Instance.new("UIGridLayout",skillRow)
+skillGrid.CellSize=UDim2.new(0.184,0,1,0)
+skillGrid.CellPadding=UDim2.new(0.02,0,0,0)
 
-for i = 1, 5 do
-	local sBtn = Instance.new("TextButton")
-	sBtn.BackgroundColor3 = State.EnabledSkills[i] and Theme.Accent or Theme.Card
-	sBtn.Text = "Skill " .. i
-	sBtn.TextColor3 = Color3.new(1, 1, 1)
-	sBtn.Font = Enum.Font.GothamBold
-	sBtn.TextSize = 10.5
-	sBtn.Parent = skillRow
-	Instance.new("UICorner", sBtn).CornerRadius = UDim.new(0, 6)
+for i=1,5 do
+	local sBtn=Instance.new("TextButton")
+	sBtn.BackgroundColor3=State.EnabledSkills[i]and Theme.Accent or Theme.Card
+	sBtn.Text="Skill " .. i
+	sBtn.TextColor3=Color3.new(1,1,1)
+	sBtn.Font=Enum.Font.GothamBold
+	sBtn.TextSize=10.5
+	sBtn.Parent=skillRow
+	Instance.new("UICorner",sBtn).CornerRadius=UDim.new(0,6)
 	sBtn.MouseButton1Click:Connect(function()
-		State.EnabledSkills[i] = not State.EnabledSkills[i]
-		sBtn.BackgroundColor3 = State.EnabledSkills[i] and Theme.Accent or Theme.Card
+		State.EnabledSkills[i]=not State.EnabledSkills[i]
+		sBtn.BackgroundColor3=State.EnabledSkills[i]and Theme.Accent or Theme.Card
 	end)
 end
 
-addSectionTitle(combatPage, "🏆 Auto Modes")
-setAutoMissionVisual = addToggleRow(combatPage, "Auto Modes", State.AutoMission, function(v)
-	State.AutoMission = v
+addSectionTitle(combatPage,"🏆 Auto Modes")
+setAutoMissionVisual=addToggleRow(combatPage,"Auto Modes",State.AutoMission,function(v)
+	State.AutoMission=v
 	if v then
-		State.AutoFarm = false
-		if setAutoFarmVisual then
-			setAutoFarmVisual(false, false)
-		end
+		State.AutoFarm=false
+		if setAutoFarmVisual then setAutoFarmVisual(false,false)end
 	else
 		stopTween()
-		State.CurrentTarget = nil
-		lastCombatPosition = nil
+		State.CurrentTarget=nil
+		lastCombatPosition=nil
 	end
 	refreshFreezeState()
 end)
 
-local missionStatus = Instance.new("TextLabel")
-missionStatus.Size = UDim2.new(1, 0, 0, 18)
-missionStatus.BackgroundTransparency = 1
-missionStatus.Text = "Trạng thái: Đang tắt"
-missionStatus.TextColor3 = Theme.Warning
-missionStatus.Font = Enum.Font.GothamBold
-missionStatus.TextSize = 11
-missionStatus.TextXAlignment = Enum.TextXAlignment.Left
-missionStatus.Parent = combatPage
+local missionStatus=Instance.new("TextLabel")
+missionStatus.Size=UDim2.new(1,0,0,18)
+missionStatus.BackgroundTransparency=1
+missionStatus.Text="Trạng thái: Đang tắt"
+missionStatus.TextColor3=Theme.Warning
+missionStatus.Font=Enum.Font.GothamBold
+missionStatus.TextSize=11
+missionStatus.TextXAlignment=Enum.TextXAlignment.Left
+missionStatus.Parent=combatPage
 
-addSectionTitle(farmPage, "👾 Auto Farm")
-addStepperRow(farmPage, "Phạm vi quét", function(v)
-	return v .. " studs"
-end, State.ScanRange, 50, 50, 1500, function(v)
-	State.ScanRange = v
-end)
+addSectionTitle(farmPage,"👾 Auto Farm")
+addStepperRow(farmPage,"Phạm vi quét",function(v)return v .. " studs" end,State.ScanRange,50,50,1500,function(v)State.ScanRange=v end)
 
-local selectedMobLabel = Instance.new("TextLabel")
-selectedMobLabel.Size = UDim2.new(1, 0, 0, 18)
-selectedMobLabel.BackgroundTransparency = 1
-selectedMobLabel.Text = "Đang chọn: Chưa chọn Mob nào"
-selectedMobLabel.TextColor3 = Color3.fromRGB(255, 210, 90)
-selectedMobLabel.Font = Enum.Font.GothamBold
-selectedMobLabel.TextSize = 11
-selectedMobLabel.TextXAlignment = Enum.TextXAlignment.Left
-selectedMobLabel.Parent = farmPage
+local selectedMobLabel=Instance.new("TextLabel")
+selectedMobLabel.Size=UDim2.new(1,0,0,18)
+selectedMobLabel.BackgroundTransparency=1
+selectedMobLabel.Text="Đang chọn: Chưa chọn Mob nào"
+selectedMobLabel.TextColor3=Color3.fromRGB(255,210,90)
+selectedMobLabel.Font=Enum.Font.GothamBold
+selectedMobLabel.TextSize=11
+selectedMobLabel.TextXAlignment=Enum.TextXAlignment.Left
+selectedMobLabel.Parent=farmPage
 
-local mobListContainer = Instance.new("Frame")
-mobListContainer.Size = UDim2.new(1, 0, 0, 0)
-mobListContainer.AutomaticSize = Enum.AutomaticSize.Y
-mobListContainer.BackgroundTransparency = 1
-mobListContainer.Parent = farmPage
+local mobListContainer=Instance.new("Frame")
+mobListContainer.Size=UDim2.new(1,0,0,0)
+mobListContainer.AutomaticSize=Enum.AutomaticSize.Y
+mobListContainer.BackgroundTransparency=1
+mobListContainer.Parent=farmPage
 
-local mobListLayout = Instance.new("UIListLayout", mobListContainer)
-mobListLayout.Padding = UDim.new(0, 4)
+local mobListLayout=Instance.new("UIListLayout",mobListContainer)
+mobListLayout.Padding=UDim.new(0,4)
 
-addActionButton(farmPage, "🔍 Auto Farm", Theme.Accent, function(btn)
-	for _, child in ipairs(mobListContainer:GetChildren()) do
-		if child:IsA("TextButton") then
-			child:Destroy()
-		end
+addActionButton(farmPage,"🔍 Auto Farm",Theme.Accent,function(btn)
+	for _,child in ipairs(mobListContainer:GetChildren())do
+		if child:IsA("TextButton")then child:Destroy()end
 	end
-	local grouped = scanGroupedMobs(State.ScanRange)
-	btn.Text = "🔍 Auto Farm (" .. tostring(#grouped) .. " loại Mob)"
-	for _, group in ipairs(grouped) do
-		local item = Instance.new("TextButton")
-		item.Size = UDim2.new(1, 0, 0, 32)
-		item.BackgroundColor3 = (State.SelectedMobName == group.Name) and Theme.Accent or Theme.Card
-		item.Text = string.format("  👾 %s (x%d)  •  Gần nhất: %dm", group.Name, group.Count, group.NearestDist)
-		item.TextColor3 = Theme.Text
-		item.Font = Enum.Font.GothamSemibold
-		item.TextSize = 11
-		item.TextXAlignment = Enum.TextXAlignment.Left
-		item.Parent = mobListContainer
-		Instance.new("UICorner", item).CornerRadius = UDim.new(0, 5)
+	local grouped=scanGroupedMobs(State.ScanRange)
+	btn.Text="🔍 Auto Farm (" ..#grouped .. " loại Mob)"
+	for _,group in ipairs(grouped)do
+		local item=Instance.new("TextButton")
+		item.Size=UDim2.new(1,0,0,32)
+		item.BackgroundColor3=(State.SelectedMobName==group.Name)and Theme.Accent or Theme.Card
+		item.Text=string.format("  👾 %s (x%d)  •  Gần nhất: %dm",group.Name,group.Count,group.NearestDist)
+		item.TextColor3=Theme.Text
+		item.Font=Enum.Font.GothamSemibold
+		item.TextSize=11
+		item.TextXAlignment=Enum.TextXAlignment.Left
+		item.Parent=mobListContainer
+		Instance.new("UICorner",item).CornerRadius=UDim.new(0,5)
 		item.MouseButton1Click:Connect(function()
-			State.SelectedMobName = group.Name
-			State.CurrentTarget = pickNearbyMobByName(group.Name, State.ScanRange)
-			selectedMobLabel.Text = "Đang chọn: " .. group.Name
-			for _, b in ipairs(mobListContainer:GetChildren()) do
-				if b:IsA("TextButton") then
-					b.BackgroundColor3 = Theme.Card
-				end
+			State.SelectedMobName=group.Name
+			State.CurrentTarget=pickNearbyMobByName(group.Name,State.ScanRange)
+			selectedMobLabel.Text="Đang chọn: " .. group.Name
+			for _,b in ipairs(mobListContainer:GetChildren())do
+				if b:IsA("TextButton")then b.BackgroundColor3=Theme.Card end
 			end
-			item.BackgroundColor3 = Theme.Accent
+			item.BackgroundColor3=Theme.Accent
 		end)
 	end
 end)
 
-addSectionTitle(movePage, "🚀 Select Move")
-setAutoFarmVisual = addToggleRow(movePage, "Select Move", State.AutoFarm, function(v)
-	State.AutoFarm = v
+addSectionTitle(movePage,"🚀 Select Move")
+setAutoFarmVisual=addToggleRow(movePage,"Select Move",State.AutoFarm,function(v)
+	State.AutoFarm=v
 	if v then
-		State.AutoMission = false
-		if setAutoMissionVisual then
-			setAutoMissionVisual(false, false)
-		end
+		State.AutoMission=false
+		if setAutoMissionVisual then setAutoMissionVisual(false,false)end
 	else
 		stopTween()
-		State.CurrentTarget = nil
-		lastCombatPosition = nil
+		State.CurrentTarget=nil
+		lastCombatPosition=nil
 	end
 	refreshFreezeState()
 end)
 
-local moveModes = { "Teleport", "Tween", "Walk" }
-local modeIdx = 1
-addActionButton(movePage, "Kiểu di chuyển: Teleport", Color3.fromRGB(60, 90, 165), function(btn)
-	modeIdx = (modeIdx % #moveModes) + 1
-	State.MoveMode = moveModes[modeIdx]
-	btn.Text = "Kiểu di chuyển: " .. State.MoveMode
+local moveModes={"Teleport","Tween","Walk"}
+local modeIdx=1
+addActionButton(movePage,"Kiểu di chuyển: Teleport",Color3.fromRGB(60,90,165),function(btn)
+	modeIdx=(modeIdx %#moveModes)+1
+	State.MoveMode=moveModes[modeIdx]
+	btn.Text="Kiểu di chuyển: " .. State.MoveMode
 	refreshFreezeState()
 end)
 
-addSectionTitle(movePage, "📍 Hit Position")
-local posModes = { "above", "below", "behind", "front" }
-local posIdx = 1
-addActionButton(movePage, "Position: above", Color3.fromRGB(130, 82, 46), function(btn)
-	posIdx = (posIdx % #posModes) + 1
-	State.AttackPosition = posModes[posIdx]
-	btn.Text = "Position: " .. posModes[posIdx]
+addToggleRow(movePage,"Noclip (Tween & Walk)",State.Noclip,function(v)
+	State.Noclip=v
+end)
+
+addSectionTitle(movePage,"📍 Hit Position")
+local posModes={"above","below","behind","front"}
+local posIdx=1
+addActionButton(movePage,"Position: above",Color3.fromRGB(130,82,46),function(btn)
+	posIdx=(posIdx %#posModes)+1
+	State.AttackPosition=posModes[posIdx]
+	btn.Text="Position: " .. posModes[posIdx]
 	refreshFreezeState()
 end)
 
-addSectionTitle(playerPage, "🏃 Player")
-addToggleRow(playerPage, "Infinity Jump", State.InfJump, function(v)
-	State.InfJump = v
-end)
-addToggleRow(playerPage, "Infinity Dash", State.InfDash, function(v)
-	State.InfDash = v
-	dashFloatBtn.Visible = v
-end)
+addSectionTitle(playerPage,"🏃 Player")
+addToggleRow(playerPage,"Infinity Jump",State.InfJump,function(v)State.InfJump=v end)
+addToggleRow(playerPage,"Infinity Dash",State.InfDash,function(v)State.InfDash=v dashFloatBtn.Visible=v end)
 
-addSectionTitle(visualPage, "👁️ Visual")
-addToggleRow(visualPage, "Reduce Effects", State.ReduceEffects, function(v)
-	State.ReduceEffects = v
-	if v then
-		applyReduceEffects()
-	end
-end)
-addToggleRow(visualPage, "Boost FPS", State.BoostFPS, function(v)
-	State.BoostFPS = v
-	if v then
-		applyBoostFPS()
-	end
-end)
-addToggleRow(visualPage, "Anti AFK", State.AntiAFK, function(v)
-	State.AntiAFK = v
-end)
+addSectionTitle(visualPage,"👁️ Visual")
+addToggleRow(visualPage,"Reduce Effects",State.ReduceEffects,function(v)State.ReduceEffects=v if v then applyReduceEffects()end end)
+addToggleRow(visualPage,"Boost FPS",State.BoostFPS,function(v)State.BoostFPS=v if v then applyBoostFPS()end end)
+addToggleRow(visualPage,"Anti AFK",State.AntiAFK,function(v)State.AntiAFK=v end)
 
 local function stopAllFunctionsOnReturn()
-	if not (State.AutoSkill or State.AutoMission or State.AutoFarm) then
-		return
-	end
-	State.AutoSkill = false
-	State.AutoMission = false
-	State.AutoFarm = false
-	State.SelectedMobName = nil
-	State.CurrentTarget = nil
-	lastCombatPosition = nil
+	if not(State.AutoSkill or State.AutoMission or State.AutoFarm)then return end
+	State.AutoSkill=false
+	State.AutoMission=false
+	State.AutoFarm=false
+	State.SelectedMobName=nil
+	State.CurrentTarget=nil
+	lastCombatPosition=nil
 	stopTween()
 	refreshFreezeState()
-	if setAutoSkillVisual then
-		setAutoSkillVisual(false, false)
-	end
-	if setAutoMissionVisual then
-		setAutoMissionVisual(false, false)
-	end
-	if setAutoFarmVisual then
-		setAutoFarmVisual(false, false)
-	end
-	missionStatus.Text = "Trạng thái: Đã tự tắt khi về Lobby"
-	selectedMobLabel.Text = "Đang chọn: Chưa chọn Mob nào"
+	if setAutoSkillVisual then setAutoSkillVisual(false,false)end
+	if setAutoMissionVisual then setAutoMissionVisual(false,false)end
+	if setAutoFarmVisual then setAutoFarmVisual(false,false)end
+	missionStatus.Text="Trạng thái: Đã tự tắt khi về Lobby"
+	selectedMobLabel.Text="Đang chọn: Chưa chọn Mob nào"
 end
 
-local returnButtonKeywords = { "return", "lobby", "leave", "exit", "back to", "quay về", "trở về", "thoát" }
-local hookedReturnButtons = setmetatable({}, { __mode = "k" })
+local returnButtonKeywords={"return","lobby","leave","exit","back to","quay về","trở về","thoát"}
+local hookedReturnButtons=setmetatable({},{__mode="k"})
 
 local function checkAndHookReturnButton(inst)
-	if not inst or not inst:IsA("GuiButton") or hookedReturnButtons[inst] then
-		return
+	if not inst or not inst:IsA("GuiButton")or hookedReturnButtons[inst]then return end
+	if inst:IsDescendantOf(screenGui)then return end
+	local btnName=string.lower(inst.Name)
+	local btnText=""
+	if inst:IsA("TextButton")then btnText=string.lower(inst.Text or "")end
+	for _,child in ipairs(inst:GetDescendants())do
+		if child:IsA("TextLabel")then btnText=btnText .. " " .. string.lower(child.Text or "")end
 	end
-	if inst:IsDescendantOf(screenGui) then
-		return
-	end
-	local btnName = string.lower(inst.Name)
-	local btnText = ""
-	if inst:IsA("TextButton") then
-		btnText = string.lower(inst.Text or "")
-	end
-	for _, child in ipairs(inst:GetDescendants()) do
-		if child:IsA("TextLabel") then
-			btnText = btnText .. " " .. string.lower(child.Text or "")
-		end
-	end
-	local isReturnBtn = false
-	for _, kw in ipairs(returnButtonKeywords) do
-		if string.find(btnName, kw, 1, true) or string.find(btnText, kw, 1, true) then
-			isReturnBtn = true
+	local isReturnBtn=false
+	for _,kw in ipairs(returnButtonKeywords)do
+		if string.find(btnName,kw,1,true)or string.find(btnText,kw,1,true)then
+			isReturnBtn=true
 			break
 		end
 	end
 	if isReturnBtn then
-		hookedReturnButtons[inst] = true
-		inst.Activated:Connect(stopAllFunctionsOnReturn)
-		inst.MouseButton1Click:Connect(stopAllFunctionsOnReturn)
+		hookedReturnButtons[inst]=true
+		inst.Activated:Connect(function()stopAllFunctionsOnReturn()end)
+		inst.MouseButton1Click:Connect(function()stopAllFunctionsOnReturn()end)
 	end
 end
 
-for _, guiObj in ipairs(playerGui:GetDescendants()) do
-	checkAndHookReturnButton(guiObj)
-end
+for _,guiObj in ipairs(playerGui:GetDescendants())do checkAndHookReturnButton(guiObj)end
 playerGui.DescendantAdded:Connect(function(guiObj)
 	checkAndHookReturnButton(guiObj)
-	task.defer(function()
-		if guiObj and guiObj.Parent then
-			checkAndHookReturnButton(guiObj)
-		end
-	end)
+	task.defer(function()if guiObj and guiObj.Parent then checkAndHookReturnButton(guiObj)end end)
 end)
 
 RunService.Heartbeat:Connect(function()
-	if not isAnyCombatActive() then
-		lastCombatPosition = nil
-		return
-	end
-	local _, hrp = getCharacterParts()
-	if not hrp then
-		return
-	end
-	if lastCombatPosition and not isValidMob(State.CurrentTarget) then
-		local jumpDist = (hrp.Position - lastCombatPosition).Magnitude
-		if jumpDist > 220 then
-			stopAllFunctionsOnReturn()
-		end
+	if not isAnyCombatActive()then lastCombatPosition=nil return end
+	local _,hrp=getCharacterParts()
+	if not hrp then return end
+	if lastCombatPosition and not isValidMob(State.CurrentTarget)then
+		local jumpDist=(hrp.Position-lastCombatPosition).Magnitude
+		if jumpDist>220 then stopAllFunctionsOnReturn()end
 	end
 end)
 
-local function makeDraggable(handle, frame, onClick)
-	local dragging = false
-	local activeInput = nil
-	local dragStart, startPos, movedDist
+local function makeDraggable(handle,frame,onClick)
+	local dragging=false
+	local activeInput=nil
+	local dragStart,startPos,movedDist
 	handle.InputBegan:Connect(function(input)
-		if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not dragging then
-			dragging = true
-			activeInput = input
-			dragStart = input.Position
-			startPos = frame.Position
-			movedDist = 0
+		if(input.UserInputType==Enum.UserInputType.MouseButton1 or input.UserInputType==Enum.UserInputType.Touch)and not dragging then
+			dragging=true
+			activeInput=input
+			dragStart=input.Position
+			startPos=frame.Position
+			movedDist=0
 		end
 	end)
 	UserInputService.InputChanged:Connect(function(input)
-		if dragging and input == activeInput then
-			local delta = input.Position - dragStart
-			movedDist = delta.Magnitude
-			local scale = uiScale.Scale > 0 and uiScale.Scale or 1
-			frame.Position = UDim2.new(
-				startPos.X.Scale,
-				startPos.X.Offset + (delta.X / scale),
-				startPos.Y.Scale,
-				startPos.Y.Offset + (delta.Y / scale)
-			)
+		if dragging and input==activeInput then
+			local delta=input.Position-dragStart
+			movedDist=delta.Magnitude
+			local scale=uiScale.Scale>0 and uiScale.Scale or 1
+			frame.Position=UDim2.new(startPos.X.Scale,startPos.X.Offset+(delta.X/scale),startPos.Y.Scale,startPos.Y.Offset+(delta.Y/scale))
 		end
 	end)
 	UserInputService.InputEnded:Connect(function(input)
-		if dragging and input == activeInput then
-			dragging = false
-			activeInput = nil
-			if onClick and movedDist < 8 then
-				onClick()
-			end
+		if dragging and input==activeInput then
+			dragging=false
+			activeInput=nil
+			if onClick and movedDist<8 then onClick()end
 		end
 	end)
 end
 
 local function toggleMenu()
-	State.MenuOpen = not State.MenuOpen
-	mainFrame.Visible = State.MenuOpen
+	State.MenuOpen=not State.MenuOpen
+	mainFrame.Visible=State.MenuOpen
 end
 
-makeDraggable(toggleIcon, toggleIcon, toggleMenu)
-makeDraggable(dashFloatBtn, dashFloatBtn, performDash)
-makeDraggable(topBar, mainFrame, nil)
+makeDraggable(toggleIcon,toggleIcon,toggleMenu)
+makeDraggable(dashFloatBtn,dashFloatBtn,performDash)
+makeDraggable(topBar,mainFrame,nil)
 hideBtn.MouseButton1Click:Connect(toggleMenu)
 
--- ================= COMBAT LOOPS =================
-local skillKeyCodes = {
-	[1] = Enum.KeyCode.One,
-	[2] = Enum.KeyCode.Two,
-	[3] = Enum.KeyCode.Three,
-	[4] = Enum.KeyCode.Four,
-	[5] = Enum.KeyCode.Five
+local skillKeyCodes={
+	[1]=Enum.KeyCode.One,
+	[2]=Enum.KeyCode.Two,
+	[3]=Enum.KeyCode.Three,
+	[4]=Enum.KeyCode.Four,
+	[5]=Enum.KeyCode.Five
 }
 
 local function canUseSkillOnTarget()
-	local _, pHRP = getCharacterParts()
-	if not pHRP then
-		return false
-	end
-	local target = State.CurrentTarget
-	if not isValidMob(target) then
-		target = findClosestAnyMob(State.SkillRange)
-	end
-	local valid, _, tHRP = isValidMob(target)
-	if not valid or not tHRP then
-		return false
-	end
-	return (tHRP.Position - pHRP.Position).Magnitude <= State.SkillRange, target
+	local _,pHRP=getCharacterParts()
+	if not pHRP then return false end
+	local target=State.CurrentTarget
+	if not isValidMob(target)then target=findClosestAnyMob(State.SkillRange)end
+	local valid,_,tHRP=isValidMob(target)
+	if not valid or not tHRP then return false end
+	return(tHRP.Position-pHRP.Position).Magnitude<=State.SkillRange,target
 end
 
-local function castSkillSlot(slotIndex, targetMob)
-	local char, _, hum = getCharacterParts()
-	if not char or not hum then
-		return
-	end
+local function castSkillSlot(slotIndex,targetMob)
+	local char,_,hum=getCharacterParts()
+	if not char or not hum then return end
 	if okVIM and VirtualInputManager then
 		pcall(function()
-			VirtualInputManager:SendKeyEvent(true, skillKeyCodes[slotIndex], false, game)
+			VirtualInputManager:SendKeyEvent(true,skillKeyCodes[slotIndex],false,game)
 			task.wait(0.01)
-			VirtualInputManager:SendKeyEvent(false, skillKeyCodes[slotIndex], false, game)
+			VirtualInputManager:SendKeyEvent(false,skillKeyCodes[slotIndex],false,game)
 		end)
 	end
-	local tools = {}
-	for _, item in ipairs(player.Backpack:GetChildren()) do
-		if item:IsA("Tool") then
-			table.insert(tools, item)
-		end
+	local tools={}
+	for _,item in ipairs(player.Backpack:GetChildren())do
+		if item:IsA("Tool")then table.insert(tools,item)end
 	end
-	if tools[slotIndex] then
-		tools[slotIndex]:Activate()
-	end
-	if skillRemote and skillRemote:IsA("RemoteEvent") then
-		skillRemote:FireServer(slotIndex, targetMob)
+	if tools[slotIndex]then tools[slotIndex]:Activate()end
+	if skillRemote and skillRemote:IsA("RemoteEvent")then
+		skillRemote:FireServer(slotIndex,targetMob)
 	end
 end
 
 task.spawn(function()
 	while true do
 		if State.AutoSkill then
-			local ok, targetMob = canUseSkillOnTarget()
+			local ok,targetMob=canUseSkillOnTarget()
 			if ok and targetMob then
-				for slot = 1, 5 do
-					if not State.AutoSkill then
-						break
-					end
-					local stillOk, currentMob = canUseSkillOnTarget()
-					if not stillOk then
-						break
-					end
-					if State.EnabledSkills[slot] then
-						castSkillSlot(slot, currentMob)
+				for slot=1,5 do
+					if not State.AutoSkill then break end
+					local stillOk,currentMob=canUseSkillOnTarget()
+					if not stillOk then break end
+					if State.EnabledSkills[slot]then
+						castSkillSlot(slot,currentMob)
 						task.wait(State.SkillDelay)
 					end
 				end
@@ -1608,15 +1323,11 @@ task.spawn(function()
 end)
 
 local function triggerBasicAttack(targetMob)
-	local char = player.Character
-	if not char then
-		return
-	end
-	local tool = char:FindFirstChildOfClass("Tool")
-	if tool then
-		tool:Activate()
-	end
-	if combatRemote and combatRemote:IsA("RemoteEvent") then
+	local char=player.Character
+	if not char then return end
+	local tool=char:FindFirstChildOfClass("Tool")
+	if tool then tool:Activate()end
+	if combatRemote and combatRemote:IsA("RemoteEvent")then
 		combatRemote:FireServer(targetMob)
 	end
 end
@@ -1624,26 +1335,24 @@ end
 task.spawn(function()
 	while true do
 		if State.AutoMission then
-			if not isValidMob(State.CurrentTarget) then
-				State.CurrentTarget = findClosestAnyMob(State.MissionScanRange)
+			if not isValidMob(State.CurrentTarget)then
+				State.CurrentTarget=findClosestAnyMob(State.MissionScanRange)
 			end
-			if isValidMob(State.CurrentTarget) then
-				local _, playerHRP = getCharacterParts()
-				local _, _, targetHRP = isValidMob(State.CurrentTarget)
-				local dist = (playerHRP and targetHRP) and math.floor((targetHRP.Position - playerHRP.Position).Magnitude) or 0
-				missionStatus.Text = string.format("Đang đánh: %s (%dm)", State.CurrentTarget.Name, dist)
+			if isValidMob(State.CurrentTarget)then
+				local _,playerHRP=getCharacterParts()
+				local _,_,targetHRP=isValidMob(State.CurrentTarget)
+				local dist=(playerHRP and targetHRP)and math.floor((targetHRP.Position-playerHRP.Position).Magnitude)or 0
+				missionStatus.Text=string.format("Đang đánh: %s (%dm)",State.CurrentTarget.Name,dist)
 				moveToTarget(State.CurrentTarget)
-				if State.MissionAutoAttack then
-					triggerBasicAttack(State.CurrentTarget)
-				end
+				if State.MissionAutoAttack then triggerBasicAttack(State.CurrentTarget)end
 			else
-				missionStatus.Text = "Đang quét tìm Mob tiếp theo..."
+				missionStatus.Text="Đang quét tìm Mob tiếp theo..."
 			end
 		elseif State.AutoFarm and State.SelectedMobName then
-			if not isValidMob(State.CurrentTarget) then
-				State.CurrentTarget = pickNearbyMobByName(State.SelectedMobName, State.ScanRange)
+			if not isValidMob(State.CurrentTarget)then
+				State.CurrentTarget=pickNearbyMobByName(State.SelectedMobName,State.ScanRange)
 			end
-			if isValidMob(State.CurrentTarget) then
+			if isValidMob(State.CurrentTarget)then
 				moveToTarget(State.CurrentTarget)
 			end
 		end
